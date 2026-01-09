@@ -1,0 +1,194 @@
+package wrapper
+
+import (
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// alExtensionVersion holds an extension path and its parsed version
+type alExtensionVersion struct {
+	path    string
+	major   int
+	minor   int
+	patch   int
+}
+
+// FindALExtension locates the newest AL extension in VS Code extensions directory
+func FindALExtension() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	extensionsDir := filepath.Join(home, ".vscode", "extensions")
+	entries, err := os.ReadDir(extensionsDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to read VS Code extensions directory: %w", err)
+	}
+
+	// Find all AL extensions matching the pattern ms-dynamics-smb.al-*
+	pattern := regexp.MustCompile(`^ms-dynamics-smb\.al-(\d+)\.(\d+)\.(\d+)$`)
+	var alExtensions []alExtensionVersion
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			matches := pattern.FindStringSubmatch(entry.Name())
+			if matches != nil {
+				major, _ := strconv.Atoi(matches[1])
+				minor, _ := strconv.Atoi(matches[2])
+				patch, _ := strconv.Atoi(matches[3])
+				alExtensions = append(alExtensions, alExtensionVersion{
+					path:  filepath.Join(extensionsDir, entry.Name()),
+					major: major,
+					minor: minor,
+					patch: patch,
+				})
+			}
+		}
+	}
+
+	if len(alExtensions) == 0 {
+		return "", fmt.Errorf("AL extension not found in %s", extensionsDir)
+	}
+
+	// Sort by version (newest first) using proper semver comparison
+	sort.Slice(alExtensions, func(i, j int) bool {
+		if alExtensions[i].major != alExtensions[j].major {
+			return alExtensions[i].major > alExtensions[j].major
+		}
+		if alExtensions[i].minor != alExtensions[j].minor {
+			return alExtensions[i].minor > alExtensions[j].minor
+		}
+		return alExtensions[i].patch > alExtensions[j].patch
+	})
+
+	return alExtensions[0].path, nil
+}
+
+// GetALLSPExecutable returns the path to the AL Language Server executable
+func GetALLSPExecutable(extensionPath string) string {
+	var binDir, executable string
+
+	switch runtime.GOOS {
+	case "windows":
+		binDir = "win32"
+		executable = "Microsoft.Dynamics.Nav.EditorServices.Host.exe"
+	case "linux":
+		binDir = "linux"
+		executable = "Microsoft.Dynamics.Nav.EditorServices.Host"
+	case "darwin":
+		binDir = "darwin"
+		executable = "Microsoft.Dynamics.Nav.EditorServices.Host"
+	default:
+		binDir = "win32"
+		executable = "Microsoft.Dynamics.Nav.EditorServices.Host.exe"
+	}
+
+	return filepath.Join(extensionPath, "bin", binDir, executable)
+}
+
+// FileURIToPath converts a file:// URI to a local file path
+func FileURIToPath(uri string) (string, error) {
+	if !strings.HasPrefix(uri, "file://") {
+		return uri, nil // Return as-is if not a file URI
+	}
+
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse URI: %w", err)
+	}
+
+	path := parsed.Path
+
+	// On Windows, file URIs look like file:///C:/path
+	// url.Parse gives us /C:/path, we need C:/path
+	if runtime.GOOS == "windows" && len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+		path = path[1:]
+	}
+
+	// URL decode the path (handles %20 for spaces, etc.)
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode path: %w", err)
+	}
+
+	return decoded, nil
+}
+
+// PathToFileURI converts a local file path to a file:// URI
+func PathToFileURI(path string) string {
+	// Normalize path separators
+	path = filepath.ToSlash(path)
+
+	// On Windows, we need file:///C:/path
+	if runtime.GOOS == "windows" && len(path) >= 2 && path[1] == ':' {
+		return "file:///" + url.PathEscape(path)
+	}
+
+	// On Unix, we need file:///path
+	return "file://" + url.PathEscape(path)
+}
+
+// NormalizePath returns a normalized absolute path
+func NormalizePath(path string) string {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return filepath.Clean(absPath)
+}
+
+// GetLogPath returns the path for the log file
+func GetLogPath() string {
+	var tempDir string
+
+	if runtime.GOOS == "windows" {
+		tempDir = os.Getenv("TEMP")
+		if tempDir == "" {
+			tempDir = os.Getenv("TMP")
+		}
+		if tempDir == "" {
+			tempDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Temp")
+		}
+	} else {
+		tempDir = "/tmp"
+	}
+
+	return filepath.Join(tempDir, "al-lsp-wrapper-go.log")
+}
+
+// ExtractSymbolFromPath extracts a symbol name from a file path
+// This is a workaround for Claude Code sending file paths instead of symbol names
+func ExtractSymbolFromPath(query string) string {
+	// Check if it looks like a file path
+	if strings.Contains(query, "/") || strings.Contains(query, "\\") {
+		// Extract filename without extension
+		base := filepath.Base(query)
+		ext := filepath.Ext(base)
+		name := strings.TrimSuffix(base, ext)
+
+		// Remove common prefixes/patterns
+		// e.g., "Tab18.Customer.dal" -> "Customer"
+		parts := strings.Split(name, ".")
+		if len(parts) > 1 {
+			// Return the last meaningful part
+			return parts[len(parts)-1]
+		}
+		return name
+	}
+
+	return query
+}
+
+// IsALFile checks if a file is an AL file based on extension
+func IsALFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".al" || ext == ".dal"
+}

@@ -1,0 +1,416 @@
+package wrapper
+
+import (
+	"encoding/json"
+	"strings"
+)
+
+// TextDocumentPositionParams represents LSP text document position parameters
+type TextDocumentPositionParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+}
+
+// TextDocumentIdentifier represents a text document identifier
+type TextDocumentIdentifier struct {
+	URI string `json:"uri"`
+}
+
+// Position represents a position in a text document
+type Position struct {
+	Line      int `json:"line"`
+	Character int `json:"character"`
+}
+
+// ALGotoDefinitionParams represents parameters for al/gotodefinition
+type ALGotoDefinitionParams struct {
+	TextDocumentPositionParams TextDocumentPositionParams `json:"textDocumentPositionParams"`
+}
+
+// WorkspaceSymbolParams represents workspace/symbol parameters
+type WorkspaceSymbolParams struct {
+	Query string `json:"query"`
+}
+
+// ALSymbolSearchParams represents parameters for al/symbolSearch
+type ALSymbolSearchParams struct {
+	Filter string `json:"filter"`
+}
+
+// Location represents an LSP location
+type Location struct {
+	URI   string `json:"uri"`
+	Range Range  `json:"range"`
+}
+
+// Range represents an LSP range
+type Range struct {
+	Start Position `json:"start"`
+	End   Position `json:"end"`
+}
+
+// Handler interface for method handlers
+type Handler interface {
+	// ShouldHandle returns true if this handler should process the method
+	ShouldHandle(method string) bool
+
+	// Handle processes the message and returns a modified message or an error response
+	// The wrapper is passed to allow handlers to send requests/notifications
+	Handle(msg *Message, wrapper WrapperInterface) (*Message, *Message)
+}
+
+// WrapperInterface defines methods handlers can call on the wrapper
+type WrapperInterface interface {
+	// EnsureFileOpened ensures a file is opened in the AL LSP
+	EnsureFileOpened(filePath string) error
+
+	// EnsureProjectInitialized ensures the project for a file is initialized
+	EnsureProjectInitialized(filePath string) error
+
+	// SendRequestToLSP sends a request to the AL LSP and waits for response
+	SendRequestToLSP(method string, params interface{}) (*Message, error)
+
+	// SendNotificationToLSP sends a notification to the AL LSP
+	SendNotificationToLSP(method string, params interface{}) error
+
+	// Log logs a message
+	Log(format string, args ...interface{})
+}
+
+// DefinitionHandler handles textDocument/definition
+type DefinitionHandler struct{}
+
+func (h *DefinitionHandler) ShouldHandle(method string) bool {
+	return method == "textDocument/definition"
+}
+
+func (h *DefinitionHandler) Handle(msg *Message, w WrapperInterface) (*Message, *Message) {
+	var params TextDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		w.Log("Failed to parse definition params: %v", err)
+		return nil, NewErrorResponse(msg.ID, InvalidParams, "Invalid parameters")
+	}
+
+	filePath, err := FileURIToPath(params.TextDocument.URI)
+	if err != nil {
+		w.Log("Failed to convert URI: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, "Invalid file URI")
+	}
+
+	// Ensure the file is opened
+	if err := w.EnsureFileOpened(filePath); err != nil {
+		w.Log("Failed to open file: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Ensure project is initialized
+	if err := w.EnsureProjectInitialized(filePath); err != nil {
+		w.Log("Failed to initialize project: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Transform to AL-specific command
+	alParams := ALGotoDefinitionParams{
+		TextDocumentPositionParams: params,
+	}
+
+	response, err := w.SendRequestToLSP("al/gotodefinition", alParams)
+	if err != nil {
+		w.Log("Failed to send definition request: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Return response with original request ID
+	if response.Error != nil {
+		return nil, &Message{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error:   response.Error,
+		}
+	}
+
+	return &Message{
+		JSONRPC: "2.0",
+		ID:      msg.ID,
+		Result:  response.Result,
+	}, nil
+}
+
+// HoverHandler handles textDocument/hover
+type HoverHandler struct{}
+
+func (h *HoverHandler) ShouldHandle(method string) bool {
+	return method == "textDocument/hover"
+}
+
+func (h *HoverHandler) Handle(msg *Message, w WrapperInterface) (*Message, *Message) {
+	var params TextDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		w.Log("Failed to parse hover params: %v", err)
+		return nil, NewErrorResponse(msg.ID, InvalidParams, "Invalid parameters")
+	}
+
+	filePath, err := FileURIToPath(params.TextDocument.URI)
+	if err != nil {
+		w.Log("Failed to convert URI: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, "Invalid file URI")
+	}
+
+	// Ensure the file is opened
+	if err := w.EnsureFileOpened(filePath); err != nil {
+		w.Log("Failed to open file: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Ensure project is initialized
+	if err := w.EnsureProjectInitialized(filePath); err != nil {
+		w.Log("Failed to initialize project: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Forward to AL LSP
+	response, err := w.SendRequestToLSP("textDocument/hover", params)
+	if err != nil {
+		w.Log("Failed to send hover request: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	if response.Error != nil {
+		return nil, &Message{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error:   response.Error,
+		}
+	}
+
+	return &Message{
+		JSONRPC: "2.0",
+		ID:      msg.ID,
+		Result:  response.Result,
+	}, nil
+}
+
+// DocumentSymbolHandler handles textDocument/documentSymbol
+type DocumentSymbolHandler struct{}
+
+func (h *DocumentSymbolHandler) ShouldHandle(method string) bool {
+	return method == "textDocument/documentSymbol"
+}
+
+func (h *DocumentSymbolHandler) Handle(msg *Message, w WrapperInterface) (*Message, *Message) {
+	var params struct {
+		TextDocument TextDocumentIdentifier `json:"textDocument"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		w.Log("Failed to parse documentSymbol params: %v", err)
+		return nil, NewErrorResponse(msg.ID, InvalidParams, "Invalid parameters")
+	}
+
+	filePath, err := FileURIToPath(params.TextDocument.URI)
+	if err != nil {
+		w.Log("Failed to convert URI: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, "Invalid file URI")
+	}
+
+	// Ensure the file is opened
+	if err := w.EnsureFileOpened(filePath); err != nil {
+		w.Log("Failed to open file: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Ensure project is initialized
+	if err := w.EnsureProjectInitialized(filePath); err != nil {
+		w.Log("Failed to initialize project: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Forward to AL LSP
+	response, err := w.SendRequestToLSP("textDocument/documentSymbol", params)
+	if err != nil {
+		w.Log("Failed to send documentSymbol request: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	if response.Error != nil {
+		return nil, &Message{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error:   response.Error,
+		}
+	}
+
+	return &Message{
+		JSONRPC: "2.0",
+		ID:      msg.ID,
+		Result:  response.Result,
+	}, nil
+}
+
+// WorkspaceSymbolHandler handles workspace/symbol
+type WorkspaceSymbolHandler struct{}
+
+func (h *WorkspaceSymbolHandler) ShouldHandle(method string) bool {
+	return method == "workspace/symbol"
+}
+
+func (h *WorkspaceSymbolHandler) Handle(msg *Message, w WrapperInterface) (*Message, *Message) {
+	var params WorkspaceSymbolParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		w.Log("Failed to parse workspaceSymbol params: %v", err)
+		return nil, NewErrorResponse(msg.ID, InvalidParams, "Invalid parameters")
+	}
+
+	query := params.Query
+
+	// Check for empty query
+	if strings.TrimSpace(query) == "" {
+		w.Log("Empty workspace/symbol query")
+		return nil, NewErrorResponse(msg.ID, InvalidParams,
+			"AL Language Server requires a non-empty query for workspace/symbol. "+
+				"Please provide a symbol name to search for.")
+	}
+
+	// Workaround: Claude Code sometimes sends file paths instead of symbol names
+	if strings.Contains(query, "/") || strings.Contains(query, "\\") {
+		query = ExtractSymbolFromPath(query)
+		w.Log("Extracted symbol from path: %s", query)
+	}
+
+	// First try standard workspace/symbol
+	response, err := w.SendRequestToLSP("workspace/symbol", WorkspaceSymbolParams{Query: query})
+	if err != nil {
+		w.Log("Failed to send workspace/symbol request: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Check if we got results
+	if response.Result != nil {
+		var results []interface{}
+		if err := json.Unmarshal(response.Result, &results); err == nil && len(results) > 0 {
+			return &Message{
+				JSONRPC: "2.0",
+				ID:      msg.ID,
+				Result:  response.Result,
+			}, nil
+		}
+	}
+
+	// Fallback to al/symbolSearch
+	w.Log("Falling back to al/symbolSearch for query: %s", query)
+	response, err = w.SendRequestToLSP("al/symbolSearch", ALSymbolSearchParams{Filter: query})
+	if err != nil {
+		w.Log("Failed to send al/symbolSearch request: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	if response.Error != nil {
+		return nil, &Message{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error:   response.Error,
+		}
+	}
+
+	return &Message{
+		JSONRPC: "2.0",
+		ID:      msg.ID,
+		Result:  response.Result,
+	}, nil
+}
+
+// ReferencesHandler handles textDocument/references
+type ReferencesHandler struct{}
+
+func (h *ReferencesHandler) ShouldHandle(method string) bool {
+	return method == "textDocument/references"
+}
+
+func (h *ReferencesHandler) Handle(msg *Message, w WrapperInterface) (*Message, *Message) {
+	var params struct {
+		TextDocument TextDocumentIdentifier `json:"textDocument"`
+		Position     Position               `json:"position"`
+		Context      struct {
+			IncludeDeclaration bool `json:"includeDeclaration"`
+		} `json:"context"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		w.Log("Failed to parse references params: %v", err)
+		return nil, NewErrorResponse(msg.ID, InvalidParams, "Invalid parameters")
+	}
+
+	filePath, err := FileURIToPath(params.TextDocument.URI)
+	if err != nil {
+		w.Log("Failed to convert URI: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, "Invalid file URI")
+	}
+
+	// Ensure the file is opened
+	if err := w.EnsureFileOpened(filePath); err != nil {
+		w.Log("Failed to open file: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Ensure project is initialized
+	if err := w.EnsureProjectInitialized(filePath); err != nil {
+		w.Log("Failed to initialize project: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	// Forward to AL LSP
+	response, err := w.SendRequestToLSP("textDocument/references", params)
+	if err != nil {
+		w.Log("Failed to send references request: %v", err)
+		return nil, NewErrorResponse(msg.ID, InternalError, err.Error())
+	}
+
+	if response.Error != nil {
+		return nil, &Message{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error:   response.Error,
+		}
+	}
+
+	return &Message{
+		JSONRPC: "2.0",
+		ID:      msg.ID,
+		Result:  response.Result,
+	}, nil
+}
+
+// UnsupportedMethodHandler handles methods that are not supported
+type UnsupportedMethodHandler struct {
+	methods map[string]bool
+}
+
+func NewUnsupportedMethodHandler() *UnsupportedMethodHandler {
+	return &UnsupportedMethodHandler{
+		methods: map[string]bool{
+			"textDocument/prepareCallHierarchy": true,
+			"callHierarchy/incomingCalls":       true,
+			"callHierarchy/outgoingCalls":       true,
+		},
+	}
+}
+
+func (h *UnsupportedMethodHandler) ShouldHandle(method string) bool {
+	return h.methods[method]
+}
+
+func (h *UnsupportedMethodHandler) Handle(msg *Message, w WrapperInterface) (*Message, *Message) {
+	w.Log("Unsupported method: %s", msg.Method)
+	return nil, NewErrorResponse(msg.ID, MethodNotFound,
+		"Method not supported by AL Language Server: "+msg.Method)
+}
+
+// GetDefaultHandlers returns the default set of handlers
+func GetDefaultHandlers() []Handler {
+	return []Handler{
+		&DefinitionHandler{},
+		&HoverHandler{},
+		&DocumentSymbolHandler{},
+		&WorkspaceSymbolHandler{},
+		&ReferencesHandler{},
+		NewUnsupportedMethodHandler(),
+	}
+}

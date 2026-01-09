@@ -1,0 +1,14 @@
+{
+  "al": {
+    "command": "${pluginDir}/bin/al-lsp-launcher.exe",
+    "args": [],
+    "extensionToLanguage": {
+      ".al": "al",
+      ".dal": "al"
+    },
+    "transport": "stdio",
+    "initializationOptions": {},
+    "settings": {},
+    "maxRestarts": 3
+  }
+}

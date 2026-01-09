@@ -1,0 +1,321 @@
+package wrapper
+
+import (
+	"os"
+	"path/filepath"
+)
+
+// FindAppJSON searches for app.json starting from the given directory,
+// searching up to maxDepth parent directories
+func FindAppJSON(startDir string, maxDepth int) string {
+	dir := startDir
+
+	for i := 0; i < maxDepth; i++ {
+		appJsonPath := filepath.Join(dir, "app.json")
+		if _, err := os.Stat(appJsonPath); err == nil {
+			return appJsonPath
+		}
+
+		// Move to parent directory
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached root
+			break
+		}
+		dir = parent
+	}
+
+	return ""
+}
+
+// GetProjectRoot determines the AL project root for a given file path
+// by finding the directory containing app.json
+func GetProjectRoot(filePath string) string {
+	dir := filepath.Dir(filePath)
+	appJson := FindAppJSON(dir, 5)
+
+	if appJson == "" {
+		return ""
+	}
+
+	return filepath.Dir(appJson)
+}
+
+// WorkspaceSettings represents AL workspace configuration
+type WorkspaceSettings struct {
+	WorkspacePath                     string                        `json:"workspacePath"`
+	ALResourceConfigurationSettings   ALResourceConfigurationSettings `json:"alResourceConfigurationSettings"`
+	SetActiveWorkspace                bool                          `json:"setActiveWorkspace"`
+	DependencyParentWorkspacePath     *string                       `json:"dependencyParentWorkspacePath"`
+	ExpectedProjectReferenceDefinitions []string                    `json:"expectedProjectReferenceDefinitions"`
+	ActiveWorkspaceClosure            []string                      `json:"activeWorkspaceClosure"`
+}
+
+// ALResourceConfigurationSettings represents AL-specific settings
+type ALResourceConfigurationSettings struct {
+	AssemblyProbingPaths     []string `json:"assemblyProbingPaths"`
+	CodeAnalyzers            []string `json:"codeAnalyzers"`
+	EnableCodeAnalysis       bool     `json:"enableCodeAnalysis"`
+	BackgroundCodeAnalysis   string   `json:"backgroundCodeAnalysis"`
+	PackageCachePaths        []string `json:"packageCachePaths"`
+	RuleSetPath              *string  `json:"ruleSetPath"`
+	EnableCodeActions        bool     `json:"enableCodeActions"`
+	IncrementalBuild         bool     `json:"incrementalBuild"`
+	OutputAnalyzerStatistics bool     `json:"outputAnalyzerStatistics"`
+	EnableExternalRulesets   bool     `json:"enableExternalRulesets"`
+}
+
+// NewWorkspaceSettings creates workspace settings for the given project root
+func NewWorkspaceSettings(projectRoot string) *WorkspaceSettings {
+	return &WorkspaceSettings{
+		WorkspacePath: projectRoot,
+		ALResourceConfigurationSettings: ALResourceConfigurationSettings{
+			AssemblyProbingPaths:     []string{"./.netpackages"},
+			CodeAnalyzers:            []string{},
+			EnableCodeAnalysis:       false,
+			BackgroundCodeAnalysis:   "Project",
+			PackageCachePaths:        []string{"./.alpackages"},
+			RuleSetPath:              nil,
+			EnableCodeActions:        true,
+			IncrementalBuild:         false,
+			OutputAnalyzerStatistics: true,
+			EnableExternalRulesets:   true,
+		},
+		SetActiveWorkspace:                true,
+		DependencyParentWorkspacePath:     nil,
+		ExpectedProjectReferenceDefinitions: []string{},
+		ActiveWorkspaceClosure:            []string{projectRoot},
+	}
+}
+
+// ActiveWorkspaceParams represents parameters for al/setActiveWorkspace
+type ActiveWorkspaceParams struct {
+	CurrentWorkspaceFolderPath WorkspaceFolderPath `json:"currentWorkspaceFolderPath"`
+	Settings                   *WorkspaceSettings  `json:"settings"`
+}
+
+// WorkspaceFolderPath represents a workspace folder
+type WorkspaceFolderPath struct {
+	URI   string `json:"uri"`
+	Name  string `json:"name"`
+	Index int    `json:"index"`
+}
+
+// NewActiveWorkspaceParams creates parameters for al/setActiveWorkspace
+func NewActiveWorkspaceParams(projectRoot string) *ActiveWorkspaceParams {
+	return &ActiveWorkspaceParams{
+		CurrentWorkspaceFolderPath: WorkspaceFolderPath{
+			URI:   PathToFileURI(projectRoot),
+			Name:  filepath.Base(projectRoot),
+			Index: 0,
+		},
+		Settings: NewWorkspaceSettings(projectRoot),
+	}
+}
+
+// DidOpenTextDocumentParams represents textDocument/didOpen parameters
+type DidOpenTextDocumentParams struct {
+	TextDocument TextDocumentItem `json:"textDocument"`
+}
+
+// TextDocumentItem represents a text document
+type TextDocumentItem struct {
+	URI        string `json:"uri"`
+	LanguageID string `json:"languageId"`
+	Version    int    `json:"version"`
+	Text       string `json:"text"`
+}
+
+// NewDidOpenParams creates parameters for textDocument/didOpen
+func NewDidOpenParams(filePath string, content string) *DidOpenTextDocumentParams {
+	languageID := "al"
+	if filepath.Ext(filePath) == ".json" {
+		languageID = "json"
+	}
+
+	return &DidOpenTextDocumentParams{
+		TextDocument: TextDocumentItem{
+			URI:        PathToFileURI(filePath),
+			LanguageID: languageID,
+			Version:    1,
+			Text:       content,
+		},
+	}
+}
+
+// DidChangeConfigurationParams represents workspace/didChangeConfiguration parameters
+type DidChangeConfigurationParams struct {
+	Settings *WorkspaceSettings `json:"settings"`
+}
+
+// InitializeParams represents LSP initialize request parameters
+type InitializeParams struct {
+	ProcessID             int                  `json:"processId"`
+	RootURI               string               `json:"rootUri,omitempty"`
+	Capabilities          ClientCapabilities   `json:"capabilities"`
+	Trace                 string               `json:"trace,omitempty"`
+	WorkspaceFolders      []WorkspaceFolder    `json:"workspaceFolders,omitempty"`
+	InitializationOptions map[string]any       `json:"initializationOptions,omitempty"`
+}
+
+// ClientCapabilities represents client capabilities
+type ClientCapabilities struct {
+	Workspace    WorkspaceCapabilities    `json:"workspace,omitempty"`
+	TextDocument TextDocumentCapabilities `json:"textDocument,omitempty"`
+	Window       WindowCapabilities       `json:"window,omitempty"`
+}
+
+// WorkspaceCapabilities represents workspace-related capabilities
+type WorkspaceCapabilities struct {
+	ApplyEdit              bool                   `json:"applyEdit,omitempty"`
+	WorkspaceEdit          WorkspaceEditCapability `json:"workspaceEdit,omitempty"`
+	DidChangeConfiguration DynamicRegistration    `json:"didChangeConfiguration,omitempty"`
+	DidChangeWatchedFiles  DynamicRegistration    `json:"didChangeWatchedFiles,omitempty"`
+	Symbol                 DynamicRegistration    `json:"symbol,omitempty"`
+	ExecuteCommand         DynamicRegistration    `json:"executeCommand,omitempty"`
+	Configuration          bool                   `json:"configuration,omitempty"`
+	WorkspaceFolders       bool                   `json:"workspaceFolders,omitempty"`
+}
+
+// WorkspaceEditCapability represents workspace edit capabilities
+type WorkspaceEditCapability struct {
+	DocumentChanges bool `json:"documentChanges,omitempty"`
+}
+
+// DynamicRegistration represents dynamic registration capability
+type DynamicRegistration struct {
+	DynamicRegistration bool `json:"dynamicRegistration,omitempty"`
+}
+
+// TextDocumentCapabilities represents text document capabilities
+type TextDocumentCapabilities struct {
+	Synchronization    TextDocumentSyncCapability `json:"synchronization,omitempty"`
+	Completion         CompletionCapability       `json:"completion,omitempty"`
+	Hover              DynamicRegistration        `json:"hover,omitempty"`
+	SignatureHelp      DynamicRegistration        `json:"signatureHelp,omitempty"`
+	Definition         DynamicRegistration        `json:"definition,omitempty"`
+	References         DynamicRegistration        `json:"references,omitempty"`
+	DocumentHighlight  DynamicRegistration        `json:"documentHighlight,omitempty"`
+	DocumentSymbol     DynamicRegistration        `json:"documentSymbol,omitempty"`
+	CodeAction         DynamicRegistration        `json:"codeAction,omitempty"`
+	CodeLens           DynamicRegistration        `json:"codeLens,omitempty"`
+	Formatting         DynamicRegistration        `json:"formatting,omitempty"`
+	RangeFormatting    DynamicRegistration        `json:"rangeFormatting,omitempty"`
+	OnTypeFormatting   DynamicRegistration        `json:"onTypeFormatting,omitempty"`
+	Rename             DynamicRegistration        `json:"rename,omitempty"`
+	DocumentLink       DynamicRegistration        `json:"documentLink,omitempty"`
+	PublishDiagnostics PublishDiagnosticsCapability `json:"publishDiagnostics,omitempty"`
+}
+
+// TextDocumentSyncCapability represents text document sync capabilities
+type TextDocumentSyncCapability struct {
+	DynamicRegistration bool `json:"dynamicRegistration,omitempty"`
+	WillSave            bool `json:"willSave,omitempty"`
+	WillSaveWaitUntil   bool `json:"willSaveWaitUntil,omitempty"`
+	DidSave             bool `json:"didSave,omitempty"`
+}
+
+// CompletionCapability represents completion capabilities
+type CompletionCapability struct {
+	DynamicRegistration bool                     `json:"dynamicRegistration,omitempty"`
+	CompletionItem      CompletionItemCapability `json:"completionItem,omitempty"`
+}
+
+// CompletionItemCapability represents completion item capabilities
+type CompletionItemCapability struct {
+	SnippetSupport bool `json:"snippetSupport,omitempty"`
+}
+
+// PublishDiagnosticsCapability represents publish diagnostics capabilities
+type PublishDiagnosticsCapability struct {
+	RelatedInformation bool `json:"relatedInformation,omitempty"`
+}
+
+// WindowCapabilities represents window capabilities
+type WindowCapabilities struct {
+	ShowMessage      ShowMessageRequestCapability `json:"showMessage,omitempty"`
+	WorkDoneProgress bool                         `json:"workDoneProgress,omitempty"`
+}
+
+// ShowMessageRequestCapability represents show message request capabilities
+type ShowMessageRequestCapability struct {
+	MessageActionItem MessageActionItemCapability `json:"messageActionItem,omitempty"`
+}
+
+// MessageActionItemCapability represents message action item capabilities
+type MessageActionItemCapability struct {
+	AdditionalPropertiesSupport bool `json:"additionalPropertiesSupport,omitempty"`
+}
+
+// WorkspaceFolder represents a workspace folder
+type WorkspaceFolder struct {
+	URI  string `json:"uri"`
+	Name string `json:"name"`
+}
+
+// NewInitializeParams creates initialize parameters
+func NewInitializeParams(workspaceRoot string) *InitializeParams {
+	return &InitializeParams{
+		ProcessID: os.Getpid(),
+		RootURI:   PathToFileURI(workspaceRoot),
+		Capabilities: ClientCapabilities{
+			Workspace: WorkspaceCapabilities{
+				ApplyEdit: true,
+				WorkspaceEdit: WorkspaceEditCapability{
+					DocumentChanges: true,
+				},
+				DidChangeConfiguration: DynamicRegistration{DynamicRegistration: true},
+				DidChangeWatchedFiles:  DynamicRegistration{DynamicRegistration: true},
+				Symbol:                 DynamicRegistration{DynamicRegistration: true},
+				ExecuteCommand:         DynamicRegistration{DynamicRegistration: true},
+				Configuration:          true,
+				WorkspaceFolders:       true,
+			},
+			TextDocument: TextDocumentCapabilities{
+				Synchronization: TextDocumentSyncCapability{
+					DynamicRegistration: true,
+					WillSave:            true,
+					WillSaveWaitUntil:   true,
+					DidSave:             true,
+				},
+				Completion: CompletionCapability{
+					DynamicRegistration: true,
+					CompletionItem: CompletionItemCapability{
+						SnippetSupport: true,
+					},
+				},
+				Hover:             DynamicRegistration{DynamicRegistration: true},
+				SignatureHelp:     DynamicRegistration{DynamicRegistration: true},
+				Definition:        DynamicRegistration{DynamicRegistration: true},
+				References:        DynamicRegistration{DynamicRegistration: true},
+				DocumentHighlight: DynamicRegistration{DynamicRegistration: true},
+				DocumentSymbol:    DynamicRegistration{DynamicRegistration: true},
+				CodeAction:        DynamicRegistration{DynamicRegistration: true},
+				CodeLens:          DynamicRegistration{DynamicRegistration: true},
+				Formatting:        DynamicRegistration{DynamicRegistration: true},
+				RangeFormatting:   DynamicRegistration{DynamicRegistration: true},
+				OnTypeFormatting:  DynamicRegistration{DynamicRegistration: true},
+				Rename:            DynamicRegistration{DynamicRegistration: true},
+				DocumentLink:      DynamicRegistration{DynamicRegistration: true},
+				PublishDiagnostics: PublishDiagnosticsCapability{
+					RelatedInformation: true,
+				},
+			},
+			Window: WindowCapabilities{
+				ShowMessage: ShowMessageRequestCapability{
+					MessageActionItem: MessageActionItemCapability{
+						AdditionalPropertiesSupport: true,
+					},
+				},
+				WorkDoneProgress: true,
+			},
+		},
+		Trace: "verbose",
+		WorkspaceFolders: []WorkspaceFolder{
+			{
+				URI:  PathToFileURI(workspaceRoot),
+				Name: filepath.Base(workspaceRoot),
+			},
+		},
+	}
+}

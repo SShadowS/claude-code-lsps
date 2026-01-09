@@ -1,0 +1,11 @@
+{
+  "name": "al-language-server-go",
+  "version": "1.0.0",
+  "description": "AL language server wrapper (Go) for Microsoft Dynamics 365 Business Central",
+  "author": {
+    "name": "SShadowS"
+  },
+  "repository": "https://github.com/SShadowS/claude-code-lsps",
+  "license": "MIT",
+  "keywords": ["al", "dynamics", "business-central", "lsp", "language-server", "go"]
+}
