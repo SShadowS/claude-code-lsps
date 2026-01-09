@@ -653,6 +653,52 @@ class ALLSPWrapper:
         # Now request symbols
         return self.send_request("textDocument/documentSymbol", params) or {}
 
+    def handle_workspace_symbol(self, params: dict) -> dict:
+        """Handle workspace/symbol with project initialization."""
+        log("handle_workspace_symbol called")
+        query = params.get("query", "")
+        log(f"Workspace symbol query: {query}")
+
+        # Ensure the initial project is loaded
+        if self.root_path:
+            # Use a dummy file URI to trigger project initialization
+            dummy_uri = Path(self.root_path).as_uri() + "/app.json"
+            self._ensure_project_initialized(dummy_uri)
+
+        # Wait for project to be fully loaded
+        self._wait_for_project_load(timeout=3)
+
+        # Try standard workspace/symbol first
+        response = self.send_request("workspace/symbol", params)
+        if response and response.get("result"):
+            log(f"workspace/symbol returned {len(response.get('result', []))} results")
+            return response
+
+        # If no results, try AL-specific al/symbolSearch
+        log("workspace/symbol returned no results, trying al/symbolSearch")
+        al_response = self.send_request("al/symbolSearch", {"query": query})
+        if al_response and al_response.get("result"):
+            log(f"al/symbolSearch returned {len(al_response.get('result', []))} results")
+            return al_response
+
+        log("No results from either workspace/symbol or al/symbolSearch")
+        return response or {"jsonrpc": "2.0", "result": []}
+
+    def handle_references(self, params: dict) -> dict:
+        """Handle textDocument/references with file opening."""
+        log("handle_references called")
+        uri = params["textDocument"]["uri"]
+        log(f"References for URI: {uri}")
+
+        # Ensure project is initialized for this file
+        self._ensure_project_initialized(uri)
+
+        # Ensure file is opened first
+        self._ensure_file_opened(uri)
+
+        # Forward to AL LSP
+        return self.send_request("textDocument/references", params) or {}
+
     def process_request(self, request: dict) -> dict:
         """Process incoming request and route appropriately."""
         method = request.get("method", "")
@@ -681,6 +727,18 @@ class ALLSPWrapper:
 
         elif method == "textDocument/hover":
             response = self.handle_hover(params)
+            if response:
+                response["id"] = request_id
+            return response
+
+        elif method == "workspace/symbol":
+            response = self.handle_workspace_symbol(params)
+            if response:
+                response["id"] = request_id
+            return response
+
+        elif method == "textDocument/references":
+            response = self.handle_references(params)
             if response:
                 response["id"] = request_id
             return response
