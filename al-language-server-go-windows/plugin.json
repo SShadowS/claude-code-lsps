@@ -1,6 +1,6 @@
 {
   "name": "al-language-server-go-windows",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AL language server wrapper (Go) for Windows - no runtime dependencies",
   "author": {
     "name": "SShadowS"
