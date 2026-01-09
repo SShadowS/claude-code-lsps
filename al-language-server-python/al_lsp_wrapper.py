@@ -660,15 +660,18 @@ class ALLSPWrapper:
         log(f"Workspace symbol query: '{query}'")
 
         # Return helpful error if query is empty
+        # This is a known Claude Code LSP tool bug - it doesn't pass the query parameter
+        # See: https://github.com/anthropics/claude-code/issues
         if not query or not query.strip():
-            log("Empty query - returning error with instructions")
+            log("Empty query - returning error (Claude Code LSP bug)")
             return {
                 "jsonrpc": "2.0",
                 "error": {
                     "code": -32602,  # Invalid params
-                    "message": "workspaceSymbol requires a 'query' parameter with a search term (e.g., 'Customer', 'Sales'). "
-                               "Pass the symbol name to search for, not a file path. "
-                               "For symbols in a specific file, use documentSymbol instead."
+                    "message": "workspaceSymbol received empty query. This is a known Claude Code LSP tool bug - "
+                               "the tool doesn't pass the 'query' parameter needed for symbol search. "
+                               "WORKAROUND: Use 'documentSymbol' to list symbols in a specific file, "
+                               "or use Grep to search for symbol names across the workspace."
                 }
             }
 

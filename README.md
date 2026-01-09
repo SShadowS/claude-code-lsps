@@ -63,15 +63,29 @@ claude
 
 Claude can use these LSP operations on AL files:
 
-- `goToDefinition` - Go to symbol definition
-- `goToImplementation` - Go to implementation
-- `hover` - Get type/documentation info
-- `documentSymbol` - List symbols in file
-- `findReferences` - Find all references
-- `workspaceSymbol` - Search symbols across workspace
-- `prepareCallHierarchy` - Get call hierarchy
-- `incomingCalls` - Find callers
-- `outgoingCalls` - Find callees
+| Operation | Status | Description |
+|-----------|--------|-------------|
+| `goToDefinition` | Working | Go to symbol definition |
+| `goToImplementation` | Working | Go to implementation |
+| `hover` | Working | Get type/documentation info |
+| `documentSymbol` | Working | List symbols in file |
+| `findReferences` | Working | Find all references |
+| `workspaceSymbol` | Bug | See [Known Issues](KnownIssues.md) |
+| `prepareCallHierarchy` | Not supported | AL LSP doesn't support this |
+| `incomingCalls` | Not supported | AL LSP doesn't support this |
+| `outgoingCalls` | Not supported | AL LSP doesn't support this |
+
+## Known Issues
+
+### workspaceSymbol Returns Empty Results
+
+Claude Code's LSP tool has a bug where it doesn't pass the required `query` parameter for `workspaceSymbol`. This causes the operation to always return 0 symbols.
+
+**Workarounds:**
+- Use `documentSymbol` to list symbols in a specific file
+- Use `Grep` to search for symbol names across the workspace
+
+See [KnownIssues.md](KnownIssues.md) for full details and technical analysis.
 
 ## License
 
