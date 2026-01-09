@@ -691,6 +691,22 @@ class ALLSPWrapper:
             log("Forwarded initialized notification")
             return None  # No response for notifications
 
+        elif method in (
+            "textDocument/prepareCallHierarchy",
+            "callHierarchy/incomingCalls",
+            "callHierarchy/outgoingCalls",
+        ):
+            # These methods are not supported by the AL Language Server
+            log(f"Unsupported method: {method}")
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32601,  # Method not found
+                    "message": f"Method '{method}' is not supported by AL Language Server",
+                },
+            }
+
         else:
             # Pass through to AL LSP (for requests with id)
             if request_id is not None:

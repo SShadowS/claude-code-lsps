@@ -9,9 +9,19 @@ The AL LSP wrapper (`al_lsp_wrapper.py`) provides integration between Claude Cod
 - **documentSymbol**: Returns full symbol tree with tables, fields, procedures, etc.
 - **Hover**: Returns markdown-formatted hover info (wrapper works, but Claude Code may have parsing issues)
 - **goToDefinition**: Works! Returns file URI and range for symbol definitions
+- **findReferences**: Works! Returns all references across project files (pass-through)
+- **workspaceSymbol**: Works! Returns symbols matching query (pass-through)
+- **goToImplementation**: Works! Returns implementation locations (pass-through)
 - **Initialization**: Properly initializes with AL-specific params, opens app.json, sets active workspace
 - **Auto-detection**: Automatically finds AL projects by searching for app.json in workspace
 - **Multi-project support**: Routes requests to correct project based on file URI (walks up to find app.json)
+
+### Not Supported by AL LSP
+
+These operations are not implemented by the AL Language Server:
+- **prepareCallHierarchy**: Call hierarchy not implemented in AL LSP
+- **incomingCalls**: Requires call hierarchy (not supported)
+- **outgoingCalls**: Requires call hierarchy (not supported)
 
 ### Known Issues
 
@@ -22,12 +32,6 @@ The AL LSP wrapper (`al_lsp_wrapper.py`) provides integration between Claude Cod
 - **Workaround**: None currently - need Claude Code fix or response transformation
 
 ## Potential Improvements
-
-### High Priority
-
-1. **Handle findReferences**
-   - AL LSP supports `referencesProvider: true`
-   - Add `handle_references()` with file opening
 
 ### Medium Priority
 

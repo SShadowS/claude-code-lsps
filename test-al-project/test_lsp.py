@@ -147,6 +147,79 @@ def main():
         response = read_message(proc, timeout=60)
         print(f"<<< SYMBOL RESPONSE (truncated):\n{json.dumps(response, indent=2)[:1000]}...")
 
+        # 6. Test findReferences on "CustomerMgt" codeunit reference
+        print("\n--- Step 6: Find References ---")
+        references_request = {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/references",
+            "params": {
+                "textDocument": {"uri": file_uri},
+                "position": {"line": 187, "character": 30},  # On "CustomerMgt"
+                "context": {"includeDeclaration": True}
+            }
+        }
+        send_message(proc, references_request)
+        print("Waiting for references response...")
+        response = read_message(proc, timeout=30)
+        print(f"<<< REFERENCES RESPONSE:\n{json.dumps(response, indent=2)}")
+
+        # 7. Test workspaceSymbol
+        print("\n--- Step 7: Workspace Symbol ---")
+        workspace_symbol_request = {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "workspace/symbol",
+            "params": {
+                "query": "Customer"
+            }
+        }
+        send_message(proc, workspace_symbol_request)
+        print("Waiting for workspaceSymbol response...")
+        response = read_message(proc, timeout=30)
+        print(f"<<< WORKSPACE SYMBOL RESPONSE:\n{json.dumps(response, indent=2)[:1000]}...")
+
+        # 8. Test goToImplementation (AL LSP supports this)
+        print("\n--- Step 8: Go To Implementation ---")
+        impl_request = {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "textDocument/implementation",
+            "params": {
+                "textDocument": {"uri": file_uri},
+                "position": {"line": 187, "character": 30}  # On "CustomerMgt"
+            }
+        }
+        send_message(proc, impl_request)
+        print("Waiting for implementation response...")
+        response = read_message(proc, timeout=30)
+        print(f"<<< IMPLEMENTATION RESPONSE:\n{json.dumps(response, indent=2)}")
+
+        # 9. Test unsupported methods (should return errors, not hang)
+        print("\n--- Step 9: Unsupported Methods (should error gracefully) ---")
+
+        unsupported_methods = [
+            ("textDocument/prepareCallHierarchy", {"textDocument": {"uri": file_uri}, "position": {"line": 10, "character": 10}}),
+            ("callHierarchy/incomingCalls", {"item": {}}),
+            ("callHierarchy/outgoingCalls", {"item": {}}),
+        ]
+
+        for i, (method, method_params) in enumerate(unsupported_methods):
+            request = {
+                "jsonrpc": "2.0",
+                "id": 100 + i,
+                "method": method,
+                "params": method_params
+            }
+            send_message(proc, request)
+            response = read_message(proc, timeout=5)
+            if response and "error" in response:
+                print(f"  {method}: Error returned (good!)")
+            elif response and "result" in response:
+                print(f"  {method}: Got result (unexpected)")
+            else:
+                print(f"  {method}: No response or timeout (bad!)")
+
         print("\n--- Test Complete ---")
 
     except Exception as e:
