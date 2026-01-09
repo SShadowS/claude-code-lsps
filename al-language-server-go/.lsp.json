@@ -1,7 +1,11 @@
 {
   "al": {
-    "command": "${pluginDir}/bin/al-lsp-launcher.exe",
-    "args": [],
+    "command": "powershell",
+    "args": [
+      "-NoProfile",
+      "-Command",
+      "$exe = Get-ChildItem -Path \"$env:USERPROFILE\\.claude\\plugins\\cache\\al-lsp-wrappers\\al-language-server-go-windows\\*\\bin\\al-lsp-wrapper.exe\" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($exe) { & $exe.FullName } else { Write-Error 'AL LSP wrapper not found'; exit 1 }"
+    ],
     "extensionToLanguage": {
       ".al": "al",
       ".dal": "al"
