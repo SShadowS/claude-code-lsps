@@ -657,11 +657,24 @@ class ALLSPWrapper:
         """Handle workspace/symbol with project initialization."""
         log("handle_workspace_symbol called")
         query = params.get("query", "")
-        log(f"Workspace symbol query: {query}")
+        log(f"Workspace symbol query: '{query}'")
+
+        # Return helpful error if query is empty
+        if not query or not query.strip():
+            log("Empty query - returning error with instructions")
+            return {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32602,  # Invalid params
+                    "message": "workspaceSymbol requires a 'query' parameter with a search term (e.g., 'Customer', 'Sales'). "
+                               "Pass the symbol name to search for, not a file path. "
+                               "For symbols in a specific file, use documentSymbol instead."
+                }
+            }
 
         # Workaround: Claude Code passes file path as query instead of search term
         # Extract meaningful symbol name from AL file path
-        if query and ('\\' in query or '/' in query or query.endswith('.al')):
+        if '\\' in query or '/' in query or query.endswith('.al'):
             original_query = query
             # Extract filename from path
             filename = query.replace('\\', '/').split('/')[-1]
