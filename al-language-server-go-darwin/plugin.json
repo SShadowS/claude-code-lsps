@@ -1,6 +1,6 @@
 {
   "name": "al-language-server-go-darwin",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "AL language server wrapper (Go) for macOS - no runtime dependencies",
   "author": {
     "name": "SShadowS"

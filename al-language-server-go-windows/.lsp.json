@@ -3,7 +3,7 @@
     "command": "cmd",
     "args": [
       "/c",
-      "@for /f \"delims=\" %d in ('dir /b /o-d \"%USERPROFILE%\\.claude\\plugins\\cache\\al-lsp-wrappers\\al-language-server-go-windows\" 2^>nul') do @\"%USERPROFILE%\\.claude\\plugins\\cache\\al-lsp-wrappers\\al-language-server-go-windows\\%d\\bin\\al-lsp-wrapper.exe\" & exit /b"
+      "for /f \"delims=\" %d in ('dir /b /o-d \"%USERPROFILE%\\.claude\\plugins\\cache\\al-lsp-wrappers\\al-language-server-go-windows\" 2^>nul ^| findstr /n \"^\" ^| findstr /b \"1:\"') do @for /f \"tokens=1,* delims=:\" %a in (\"%d\") do @\"%USERPROFILE%\\.claude\\plugins\\cache\\al-lsp-wrappers\\al-language-server-go-windows\\%b\\bin\\al-lsp-wrapper.exe\""
     ],
     "extensionToLanguage": {
       ".al": "al",
