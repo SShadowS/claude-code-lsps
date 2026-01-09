@@ -1,0 +1,11 @@
+{
+  "name": "al-language-server-python",
+  "version": "1.0.3",
+  "description": "AL language server wrapper (Python) for Microsoft Dynamics 365 Business Central",
+  "author": {
+    "name": "SShadowS"
+  },
+  "repository": "https://github.com/SShadowS/claude-code-lsps",
+  "license": "MIT",
+  "keywords": ["al", "dynamics", "business-central", "lsp", "language-server", "python"]
+}

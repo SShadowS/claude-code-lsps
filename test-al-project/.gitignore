@@ -1,0 +1,31 @@
+# AL build artifacts
+.alpackages/
+.alcache/
+*.app
+.caltestrunner/
+
+
+# VS Code
+.vscode/
+.snapshots/
+
+# Business Central
+.netpackages/
+Reference/
+
+# Build output
+out/
+bin/
+obj/
+
+# Temp files
+*.tmp
+*.temp
+*.log
+
+# User-specific files
+*.user
+*.suo
+
+# Dependencies
+node_modules/

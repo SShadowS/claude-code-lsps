@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+CLAUDE.md
+.claude/
+.alpackages/

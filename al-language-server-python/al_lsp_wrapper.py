@@ -1,0 +1,792 @@
+#!/usr/bin/env python3
+"""
+AL Language Server Wrapper for Claude Code.
+
+This wrapper sits between Claude Code and the AL Language Server, handling:
+1. Proper initialization sequence (workspace config, app.json, active workspace)
+2. Translation of standard LSP calls to AL-specific calls
+3. Response format normalization
+
+Based on the Serena project's AL Language Server implementation.
+"""
+
+import json
+import os
+import platform
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote
+
+# Logging to file for debugging
+LOG_FILE = os.path.join(os.environ.get("TEMP", "/tmp"), "al-lsp-wrapper.log")
+
+
+def log(msg: str) -> None:
+    """Log message to file."""
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{msg}\n")
+    except Exception:
+        pass
+
+
+def find_al_extension() -> str | None:
+    """Find newest AL extension in VS Code extensions."""
+    home = Path.home()
+    possible_paths = []
+
+    if platform.system() == "Windows":
+        possible_paths = [
+            home / ".vscode" / "extensions",
+            home / ".vscode-insiders" / "extensions",
+        ]
+    else:
+        possible_paths = [
+            home / ".vscode" / "extensions",
+            home / ".vscode-server" / "extensions",
+            home / ".vscode-insiders" / "extensions",
+        ]
+
+    candidates = []
+    for base_path in possible_paths:
+        if base_path.exists():
+            for item in base_path.iterdir():
+                if item.is_dir() and item.name.startswith("ms-dynamics-smb.al-"):
+                    candidates.append(item)
+
+    if not candidates:
+        return None
+
+    # Sort by version (extract version string after "ms-dynamics-smb.al-")
+    def version_key(p: Path) -> tuple:
+        version_str = p.name.replace("ms-dynamics-smb.al-", "")
+        try:
+            return tuple(int(x) for x in version_str.split("."))
+        except ValueError:
+            return (0,)
+
+    candidates.sort(key=version_key, reverse=True)
+    return str(candidates[0])
+
+
+def get_executable_path(extension_path: str) -> str:
+    """Get platform-specific executable path."""
+    system = platform.system()
+    if system == "Windows":
+        return os.path.join(extension_path, "bin", "win32", "Microsoft.Dynamics.Nav.EditorServices.Host.exe")
+    elif system == "Linux":
+        return os.path.join(extension_path, "bin", "linux", "Microsoft.Dynamics.Nav.EditorServices.Host")
+    elif system == "Darwin":
+        return os.path.join(extension_path, "bin", "darwin", "Microsoft.Dynamics.Nav.EditorServices.Host")
+    else:
+        raise RuntimeError(f"Unsupported platform: {system}")
+
+
+def find_al_project(start_path: str, max_depth: int = 5) -> str | None:
+    """
+    Find AL project root by searching for app.json.
+
+    Searches in the start_path and its subdirectories (up to max_depth).
+    Returns the directory containing app.json, or None if not found.
+    """
+    start = Path(start_path)
+    if not start.exists():
+        return None
+
+    # First check if app.json is directly in start_path
+    if (start / "app.json").exists():
+        log(f"Found app.json in: {start}")
+        return str(start)
+
+    # Search subdirectories (breadth-first, limited depth)
+    for depth in range(1, max_depth + 1):
+        pattern = "/".join(["*"] * depth) + "/app.json"
+        matches = list(start.glob(pattern))
+        if matches:
+            # Return the first match's parent directory
+            project_path = str(matches[0].parent)
+            log(f"Found app.json at depth {depth}: {project_path}")
+            return project_path
+
+    log(f"No app.json found in {start_path} (searched {max_depth} levels deep)")
+    return None
+
+
+def find_project_for_file(file_path: str) -> str | None:
+    """
+    Find AL project root for a specific file by walking UP to find app.json.
+
+    This is used to determine which project a file belongs to when a workspace
+    contains multiple AL projects.
+    """
+    current = Path(file_path).parent
+    while current != current.parent:  # Stop at filesystem root
+        if (current / "app.json").exists():
+            log(f"Found project for file {file_path}: {current}")
+            return str(current)
+        current = current.parent
+    log(f"No project found for file: {file_path}")
+    return None
+
+
+class ALLSPWrapper:
+    """Wrapper for AL Language Server."""
+
+    def __init__(self):
+        self.process: subprocess.Popen | None = None
+        self.request_id = 0
+        self.pending_requests: dict[int, Any] = {}
+        self.initialized = False
+        self.root_path: str | None = None
+        self.root_uri: str | None = None
+        self._read_thread: threading.Thread | None = None
+        self._running = False
+        self.opened_files: set[str] = set()  # Track opened files
+        self.initialized_projects: set[str] = set()  # Track initialized project roots
+
+    def start(self, executable: str) -> None:
+        """Start the AL LSP process."""
+        log(f"Starting AL LSP: {executable}")
+        self.process = subprocess.Popen(
+            [executable],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self._running = True
+        log("AL LSP process started")
+
+    def send_message(self, msg: dict) -> None:
+        """Send JSON-RPC message to AL LSP."""
+        if not self.process or not self.process.stdin:
+            return
+        content = json.dumps(msg)
+        message = f"Content-Length: {len(content)}\r\n\r\n{content}"
+        self.process.stdin.write(message.encode("utf-8"))
+        self.process.stdin.flush()
+        log(f"Sent: {msg.get('method', msg.get('id', 'response'))}")
+
+    def read_message(self) -> dict | None:
+        """Read JSON-RPC message from AL LSP."""
+        if not self.process or not self.process.stdout:
+            return None
+
+        try:
+            # Read headers
+            headers = {}
+            while True:
+                line = self.process.stdout.readline().decode("utf-8")
+                if not line or line == "\r\n":
+                    break
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    headers[key.strip()] = value.strip()
+
+            if "Content-Length" not in headers:
+                return None
+
+            # Read content
+            content_length = int(headers["Content-Length"])
+            content = self.process.stdout.read(content_length).decode("utf-8")
+            return json.loads(content)
+        except Exception as e:
+            log(f"Error reading message: {e}")
+            return None
+
+    def send_request(self, method: str, params: dict) -> dict | None:
+        """Send request and wait for response."""
+        self.request_id += 1
+        request = {
+            "jsonrpc": "2.0",
+            "id": self.request_id,
+            "method": method,
+            "params": params,
+        }
+        log(f"Sending to AL LSP: {method} (id={self.request_id})")
+        self.send_message(request)
+
+        # Wait for response with matching ID
+        log(f"Waiting for response to {method}...")
+        while True:
+            response = self.read_message()
+            if response is None:
+                log(f"Got None response for {method}")
+                return None
+            if response.get("id") == self.request_id:
+                log(f"Got response for {method}")
+                return response
+            # Handle notifications
+            if "method" in response and "id" not in response:
+                self.handle_notification(response)
+
+    def send_notification(self, method: str, params: dict) -> None:
+        """Send notification (no response expected)."""
+        notification = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }
+        self.send_message(notification)
+
+    def handle_notification(self, notification: dict) -> None:
+        """Handle incoming notification from AL LSP."""
+        method = notification.get("method", "")
+        log(f"Notification: {method}")
+        # Just log for now, can be extended to forward to client
+
+    def _uri_to_path(self, uri: str) -> str:
+        """Convert file URI to local path."""
+        file_path = uri.replace("file:///", "").replace("file://", "")
+        # Decode URL-encoded characters (e.g., %20 -> space)
+        file_path = unquote(file_path)
+        if platform.system() == "Windows" and file_path.startswith("/"):
+            file_path = file_path[1:]
+        return file_path
+
+    def _ensure_file_opened(self, uri: str) -> None:
+        """Ensure file is opened with AL LSP before operations."""
+        if uri in self.opened_files:
+            return
+
+        file_path = self._uri_to_path(uri)
+        try:
+            with open(file_path, encoding="utf-8") as f:
+                content = f.read()
+
+            self.send_notification("textDocument/didOpen", {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "al",
+                    "version": 1,
+                    "text": content,
+                }
+            })
+            self.opened_files.add(uri)
+            log(f"Opened file: {file_path}")
+        except Exception as e:
+            log(f"Failed to open file {file_path}: {e}")
+
+    def _ensure_project_initialized(self, file_uri: str) -> str | None:
+        """
+        Ensure the AL project for a file is initialized.
+
+        Returns the project root path, or None if no project found.
+        """
+        file_path = self._uri_to_path(file_uri)
+        project_root = find_project_for_file(file_path)
+
+        if not project_root:
+            log(f"No project found for {file_path}")
+            return None
+
+        # Normalize the path for consistent tracking
+        project_root = str(Path(project_root).resolve())
+
+        if project_root in self.initialized_projects:
+            log(f"Project already initialized: {project_root}")
+            return project_root
+
+        log(f"Initializing project: {project_root}")
+
+        # Send workspace configuration for this project
+        self.send_notification(
+            "workspace/didChangeConfiguration",
+            {
+                "settings": {
+                    "workspacePath": project_root,
+                    "alResourceConfigurationSettings": {
+                        "assemblyProbingPaths": ["./.netpackages"],
+                        "codeAnalyzers": [],
+                        "enableCodeAnalysis": False,
+                        "backgroundCodeAnalysis": "Project",
+                        "packageCachePaths": ["./.alpackages"],
+                        "ruleSetPath": None,
+                        "enableCodeActions": True,
+                        "incrementalBuild": False,
+                        "outputAnalyzerStatistics": True,
+                        "enableExternalRulesets": True,
+                    },
+                    "setActiveWorkspace": True,
+                    "expectedProjectReferenceDefinitions": [],
+                    "activeWorkspaceClosure": [project_root],
+                }
+            },
+        )
+
+        # Open app.json for this project
+        app_json_path = Path(project_root) / "app.json"
+        if app_json_path.exists():
+            try:
+                with open(app_json_path, encoding="utf-8") as f:
+                    app_json_content = f.read()
+
+                self.send_notification(
+                    "textDocument/didOpen",
+                    {
+                        "textDocument": {
+                            "uri": app_json_path.as_uri(),
+                            "languageId": "json",
+                            "version": 1,
+                            "text": app_json_content,
+                        }
+                    },
+                )
+                log(f"Opened app.json for project: {project_root}")
+            except Exception as e:
+                log(f"Failed to open app.json for {project_root}: {e}")
+
+        # Set as active workspace
+        try:
+            workspace_uri = Path(project_root).resolve().as_uri()
+            self.send_request(
+                "al/setActiveWorkspace",
+                {
+                    "currentWorkspaceFolderPath": {
+                        "uri": workspace_uri,
+                        "name": Path(project_root).name,
+                        "index": 0,
+                    },
+                    "settings": {
+                        "workspacePath": project_root,
+                        "setActiveWorkspace": True,
+                    },
+                },
+            )
+            log(f"Set active workspace: {project_root}")
+        except Exception as e:
+            log(f"Failed to set active workspace for {project_root}: {e}")
+
+        # Mark as initialized
+        self.initialized_projects.add(project_root)
+        log(f"Project initialized: {project_root}")
+
+        return project_root
+
+    def initialize(self, params: dict) -> dict:
+        """Handle initialize request with AL-specific setup."""
+        workspace_root = params.get("rootPath") or params.get("rootUri", "").replace("file:///", "").replace("file://", "")
+
+        # Auto-detect AL project by finding app.json
+        al_project = find_al_project(workspace_root) if workspace_root else None
+
+        if al_project:
+            self.root_path = al_project
+            self.root_uri = Path(al_project).as_uri()
+            log(f"Auto-detected AL project: {self.root_path}")
+        else:
+            # Fallback to workspace root
+            self.root_path = workspace_root
+            self.root_uri = params.get("rootUri")
+            if not self.root_uri and self.root_path:
+                self.root_uri = Path(self.root_path).as_uri()
+            log(f"No AL project found, using workspace root: {self.root_path}")
+
+        log(f"Initialize with root: {self.root_path}")
+
+        # Build AL-specific initialize params
+        al_params = self._build_initialize_params(params)
+
+        # Send to AL LSP
+        response = self.send_request("initialize", al_params)
+
+        if response and "result" in response:
+            self.initialized = True
+            # Send initialized notification
+            self.send_notification("initialized", {})
+            # Perform post-initialization
+            self._post_initialize()
+
+        return response or {"jsonrpc": "2.0", "id": params.get("id", 0), "result": {}}
+
+    def _build_initialize_params(self, original_params: dict) -> dict:
+        """Build AL-specific initialize params."""
+        root_path = Path(self.root_path).resolve() if self.root_path else Path.cwd()
+        root_uri = root_path.as_uri()
+
+        return {
+            "processId": os.getpid(),
+            "rootPath": str(root_path),
+            "rootUri": root_uri,
+            "capabilities": {
+                "workspace": {
+                    "applyEdit": True,
+                    "workspaceEdit": {
+                        "documentChanges": True,
+                        "resourceOperations": ["create", "rename", "delete"],
+                        "failureHandling": "textOnlyTransactional",
+                        "normalizesLineEndings": True,
+                    },
+                    "configuration": True,
+                    "didChangeWatchedFiles": {"dynamicRegistration": True},
+                    "symbol": {"dynamicRegistration": True, "symbolKind": {"valueSet": list(range(1, 27))}},
+                    "executeCommand": {"dynamicRegistration": True},
+                    "didChangeConfiguration": {"dynamicRegistration": True},
+                    "workspaceFolders": True,
+                },
+                "textDocument": {
+                    "synchronization": {
+                        "dynamicRegistration": True,
+                        "willSave": True,
+                        "willSaveWaitUntil": True,
+                        "didSave": True,
+                    },
+                    "completion": {
+                        "dynamicRegistration": True,
+                        "contextSupport": True,
+                        "completionItem": {
+                            "snippetSupport": True,
+                            "commitCharactersSupport": True,
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "deprecatedSupport": True,
+                            "preselectSupport": True,
+                        },
+                    },
+                    "hover": {"dynamicRegistration": True, "contentFormat": ["markdown", "plaintext"]},
+                    "definition": {"dynamicRegistration": True, "linkSupport": True},
+                    "references": {"dynamicRegistration": True},
+                    "documentHighlight": {"dynamicRegistration": True},
+                    "documentSymbol": {
+                        "dynamicRegistration": True,
+                        "symbolKind": {"valueSet": list(range(1, 27))},
+                        "hierarchicalDocumentSymbolSupport": True,
+                    },
+                    "codeAction": {"dynamicRegistration": True},
+                    "formatting": {"dynamicRegistration": True},
+                    "rangeFormatting": {"dynamicRegistration": True},
+                    "rename": {"dynamicRegistration": True, "prepareSupport": True},
+                },
+                "window": {
+                    "showMessage": {"messageActionItem": {"additionalPropertiesSupport": True}},
+                    "showDocument": {"support": True},
+                    "workDoneProgress": True,
+                },
+            },
+            "trace": "verbose",
+            "workspaceFolders": [{"uri": root_uri, "name": root_path.name}],
+        }
+
+    def _post_initialize(self) -> None:
+        """Perform AL-specific post-initialization."""
+        if not self.root_path:
+            return
+
+        log("Post-initialization starting...")
+
+        # Send workspace configuration
+        self.send_notification(
+            "workspace/didChangeConfiguration",
+            {
+                "settings": {
+                    "workspacePath": self.root_path,
+                    "alResourceConfigurationSettings": {
+                        "assemblyProbingPaths": ["./.netpackages"],
+                        "codeAnalyzers": [],
+                        "enableCodeAnalysis": False,
+                        "backgroundCodeAnalysis": "Project",
+                        "packageCachePaths": ["./.alpackages"],
+                        "ruleSetPath": None,
+                        "enableCodeActions": True,
+                        "incrementalBuild": False,
+                        "outputAnalyzerStatistics": True,
+                        "enableExternalRulesets": True,
+                    },
+                    "setActiveWorkspace": True,
+                    "expectedProjectReferenceDefinitions": [],
+                    "activeWorkspaceClosure": [self.root_path],
+                }
+            },
+        )
+        log("Sent workspace configuration")
+
+        # Open app.json to trigger project loading
+        app_json_path = Path(self.root_path) / "app.json"
+        if app_json_path.exists():
+            try:
+                with open(app_json_path, encoding="utf-8") as f:
+                    app_json_content = f.read()
+
+                self.send_notification(
+                    "textDocument/didOpen",
+                    {
+                        "textDocument": {
+                            "uri": app_json_path.as_uri(),
+                            "languageId": "json",
+                            "version": 1,
+                            "text": app_json_content,
+                        }
+                    },
+                )
+                log(f"Opened app.json: {app_json_path}")
+            except Exception as e:
+                log(f"Failed to open app.json: {e}")
+
+        # Set active workspace
+        try:
+            workspace_uri = Path(self.root_path).resolve().as_uri()
+            self.send_request(
+                "al/setActiveWorkspace",
+                {
+                    "currentWorkspaceFolderPath": {
+                        "uri": workspace_uri,
+                        "name": Path(self.root_path).name,
+                        "index": 0,
+                    },
+                    "settings": {
+                        "workspacePath": self.root_path,
+                        "setActiveWorkspace": True,
+                    },
+                },
+            )
+            log("Set active workspace")
+        except Exception as e:
+            log(f"Failed to set active workspace: {e}")
+
+        # Wait for project to be fully loaded before returning
+        self._wait_for_project_load(timeout=5)
+
+        # Track this project as initialized
+        if self.root_path:
+            normalized_path = str(Path(self.root_path).resolve())
+            self.initialized_projects.add(normalized_path)
+            log(f"Tracked initial project: {normalized_path}")
+
+        log("Post-initialization complete")
+
+    def check_project_loaded(self) -> bool:
+        """Check if AL project is fully loaded using al/hasProjectClosureLoadedRequest."""
+        try:
+            response = self.send_request("al/hasProjectClosureLoadedRequest", {})
+            log(f"Project load check response: {response}")
+            if response and "result" in response:
+                result = response["result"]
+                log(f"Project load result: {result} (type: {type(result).__name__})")
+                if isinstance(result, bool):
+                    return result
+                elif isinstance(result, dict):
+                    return result.get("loaded", False)
+                elif result is None:
+                    # None might mean "not supported" - assume loaded
+                    log("Project load returned None - assuming loaded")
+                    return True
+            return False
+        except Exception as e:
+            log(f"Project load check failed: {e}")
+            return True  # Assume loaded if check fails
+
+    def _wait_for_project_load(self, timeout: int = 5) -> bool:
+        """Poll until project is loaded or timeout."""
+        start = time.time()
+        log(f"Waiting for project to load (timeout: {timeout}s)...")
+
+        while time.time() - start < timeout:
+            if self.check_project_loaded():
+                elapsed = time.time() - start
+                log(f"Project loaded after {elapsed:.1f}s")
+                return True
+            time.sleep(0.5)
+
+        log(f"Project load check timed out after {timeout}s")
+        return False
+
+    def handle_definition(self, params: dict) -> dict:
+        """Handle textDocument/definition using AL's custom command."""
+        log("handle_definition called")
+        uri = params["textDocument"]["uri"]
+        log(f"Definition for URI: {uri}")
+
+        # Ensure project is initialized for this file
+        self._ensure_project_initialized(uri)
+
+        # Ensure file is opened first
+        self._ensure_file_opened(uri)
+
+        # Try AL's custom gotodefinition first
+        # AL LSP expects params wrapped in textDocumentPositionParams
+        try:
+            al_params = {
+                "textDocumentPositionParams": {
+                    "textDocument": params["textDocument"],
+                    "position": params["position"],
+                }
+            }
+            log(f"Sending al/gotodefinition with params: {al_params}")
+            response = self.send_request("al/gotodefinition", al_params)
+            if response and "result" in response:
+                return response
+        except Exception as e:
+            log(f"al/gotodefinition failed: {e}")
+
+        # Fallback to standard
+        return self.send_request("textDocument/definition", params) or {}
+
+    def handle_hover(self, params: dict) -> dict:
+        """Handle textDocument/hover with file opening."""
+        log("handle_hover called")
+        uri = params["textDocument"]["uri"]
+        log(f"Hover for URI: {uri}")
+
+        # Ensure project is initialized for this file
+        self._ensure_project_initialized(uri)
+
+        # Ensure file is opened first
+        self._ensure_file_opened(uri)
+
+        # Forward to AL LSP
+        return self.send_request("textDocument/hover", params) or {}
+
+    def handle_document_symbol(self, params: dict) -> dict:
+        """Handle textDocument/documentSymbol with file opening."""
+        log("handle_document_symbol called")
+        uri = params["textDocument"]["uri"]
+        log(f"Document symbol for URI: {uri}")
+
+        # Ensure project is initialized for this file
+        self._ensure_project_initialized(uri)
+
+        # Ensure file is opened first
+        self._ensure_file_opened(uri)
+
+        # Now request symbols
+        return self.send_request("textDocument/documentSymbol", params) or {}
+
+    def process_request(self, request: dict) -> dict:
+        """Process incoming request and route appropriately."""
+        method = request.get("method", "")
+        params = request.get("params", {})
+        request_id = request.get("id")
+
+        log(f"Processing request: {method}")
+
+        if method == "initialize":
+            response = self.initialize(params)
+            if response:
+                response["id"] = request_id
+            return response
+
+        elif method == "textDocument/definition":
+            response = self.handle_definition(params)
+            if response:
+                response["id"] = request_id
+            return response
+
+        elif method == "textDocument/documentSymbol":
+            response = self.handle_document_symbol(params)
+            if response:
+                response["id"] = request_id
+            return response
+
+        elif method == "textDocument/hover":
+            response = self.handle_hover(params)
+            if response:
+                response["id"] = request_id
+            return response
+
+        elif method == "initialized":
+            # initialized is a notification, not a request - no response expected
+            self.send_notification(method, params)
+            log("Forwarded initialized notification")
+            return None  # No response for notifications
+
+        else:
+            # Pass through to AL LSP (for requests with id)
+            if request_id is not None:
+                response = self.send_request(method, params)
+                if response:
+                    response["id"] = request_id
+                return response or {"jsonrpc": "2.0", "id": request_id, "result": None}
+            else:
+                # It's a notification, forward without expecting response
+                self.send_notification(method, params)
+                return None
+
+
+def read_client_message() -> dict | None:
+    """Read JSON-RPC message from stdin (Claude Code)."""
+    try:
+        headers = {}
+        while True:
+            line = sys.stdin.buffer.readline().decode("utf-8")
+            if not line or line == "\r\n":
+                break
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip()] = value.strip()
+
+        if "Content-Length" not in headers:
+            return None
+
+        content_length = int(headers["Content-Length"])
+        content = sys.stdin.buffer.read(content_length).decode("utf-8")
+        return json.loads(content)
+    except Exception as e:
+        log(f"Error reading client message: {e}")
+        return None
+
+
+def write_client_message(msg: dict) -> None:
+    """Write JSON-RPC message to stdout (Claude Code)."""
+    content = json.dumps(msg)
+    message = f"Content-Length: {len(content)}\r\n\r\n{content}"
+    sys.stdout.buffer.write(message.encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+
+def main():
+    """Main entry point."""
+    log("=" * 50)
+    log("AL LSP Wrapper starting...")
+
+    # Find AL extension
+    extension_path = find_al_extension()
+    if not extension_path:
+        log("ERROR: AL extension not found")
+        sys.exit(1)
+
+    log(f"Found AL extension: {extension_path}")
+
+    # Get executable
+    executable = get_executable_path(extension_path)
+    if not os.path.exists(executable):
+        log(f"ERROR: Executable not found: {executable}")
+        sys.exit(1)
+
+    log(f"Using executable: {executable}")
+
+    # Create wrapper and start AL LSP
+    wrapper = ALLSPWrapper()
+    wrapper.start(executable)
+
+    # Main loop - proxy messages between Claude Code and AL LSP
+    try:
+        while True:
+            # Read request from Claude Code
+            request = read_client_message()
+            if request is None:
+                break
+
+            log(f"Received from client: {request.get('method', request.get('id', 'unknown'))}")
+
+            # Process and get response
+            response = wrapper.process_request(request)
+
+            # Send response to Claude Code
+            if response:
+                write_client_message(response)
+                log(f"Sent to client: {response.get('id', 'notification')}")
+
+    except KeyboardInterrupt:
+        log("Interrupted")
+    except Exception as e:
+        log(f"Error in main loop: {e}")
+    finally:
+        if wrapper.process:
+            wrapper.process.terminate()
+        log("AL LSP Wrapper stopped")
+
+
+if __name__ == "__main__":
+    main()

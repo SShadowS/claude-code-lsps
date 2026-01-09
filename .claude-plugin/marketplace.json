@@ -1,0 +1,27 @@
+{
+  "name": "al-lsp-wrappers",
+  "description": "AL Language Server wrappers for Claude Code - Business Central development",
+  "owner": {
+    "name": "SShadowS"
+  },
+  "plugins": [
+    {
+      "name": "al-language-server-python",
+      "version": "1.0.3",
+      "source": "./al-language-server-python",
+      "description": "AL language server wrapper (Python) for Microsoft Dynamics 365 Business Central",
+      "category": "development",
+      "tags": [
+        "al",
+        "dynamics",
+        "business-central",
+        "lsp",
+        "language-server",
+        "python"
+      ],
+      "author": {
+        "name": "SShadowS"
+      }
+    }
+  ]
+}
