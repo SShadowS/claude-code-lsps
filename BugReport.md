@@ -50,15 +50,35 @@ Or alternatively, repurpose an existing parameter when operation is `workspaceSy
 
 Users can use `documentSymbol` to list symbols in a specific file, or use `Grep` to search for symbol names across the workspace.
 
+## Steps to Reproduce
+
+### Method 1: Direct LSP Tool Usage
+1. Set environment variable `ENABLE_LSP_TOOL=1`
+2. Open Claude Code in a project with an LSP configured
+3. Ask Claude: "Use the LSP workspaceSymbol operation to find symbols named 'Customer'"
+4. Claude will call: `LSP(operation: "workspaceSymbol", file: "some/file.al")`
+5. **Result:** 0 symbols returned
+
+### Method 2: Via AL LSP Wrapper (with logging)
+1. Install the AL LSP wrapper from `SShadowS/claude-code-lsps`
+2. Check the log file at `%TEMP%/al-lsp-wrapper.log`
+3. Ask Claude to search for workspace symbols
+4. **Log shows:**
+   ```
+   handle_workspace_symbol called
+   DEBUG params: {'query': ''}
+   Workspace symbol query: ''
+   ```
+5. The query parameter is empty - Claude Code never passes the search term
+
+### Method 3: Compare with Working Operations
+1. `documentSymbol` works: `LSP(operation: "documentSymbol", file: "path/to/file.al")` → Returns symbols
+2. `findReferences` works: `LSP(operation: "findReferences", file: "...", line: 10, character: 5)` → Returns references
+3. `workspaceSymbol` fails: Always returns 0 symbols regardless of codebase content
+
 ## Environment
 
 - Claude Code version: Latest
 - Language Server: AL Language Server (Microsoft Dynamics 365 Business Central)
 - OS: Windows 11
-
-## Reproduction Steps
-
-1. Open a project with an LSP configured (e.g., AL Language Server)
-2. Ask Claude to use `workspaceSymbol` to find symbols
-3. Observe that 0 symbols are returned
-4. Check language server logs to confirm empty query is sent
+- Also reproducible with other LSP servers that support workspaceSymbol
