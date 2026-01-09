@@ -1,5 +1,5 @@
 {
-  "name": "al-lsp-wrappers",
+  "name": "claude-code-lsps",
   "description": "AL Language Server wrappers for Claude Code - Business Central development",
   "owner": {
     "name": "SShadowS"
