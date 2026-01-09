@@ -659,6 +659,24 @@ class ALLSPWrapper:
         query = params.get("query", "")
         log(f"Workspace symbol query: {query}")
 
+        # Workaround: Claude Code passes file path as query instead of search term
+        # Extract meaningful symbol name from AL file path
+        if query and ('\\' in query or '/' in query or query.endswith('.al')):
+            original_query = query
+            # Extract filename from path
+            filename = query.replace('\\', '/').split('/')[-1]
+            # Remove .al extension
+            if filename.endswith('.al'):
+                filename = filename[:-3]
+            # AL files: "ObjectType ObjectId Name.al" - extract the Name part
+            # e.g. "Table 6175301 CDO File" → "CDO File"
+            parts = filename.split(' ', 2)  # Split into max 3 parts
+            if len(parts) >= 3:
+                query = parts[2]  # The name part
+            else:
+                query = filename
+            log(f"Extracted query from file path: '{original_query}' → '{query}'")
+
         # Ensure the initial project is loaded
         if self.root_path:
             # Use a dummy file URI to trigger project initialization
@@ -668,8 +686,9 @@ class ALLSPWrapper:
         # Wait for project to be fully loaded
         self._wait_for_project_load(timeout=3)
 
-        # Try standard workspace/symbol first
-        response = self.send_request("workspace/symbol", params)
+        # Try standard workspace/symbol first (use extracted query)
+        search_params = {"query": query}
+        response = self.send_request("workspace/symbol", search_params)
         result = response.get("result") if response else None
         if isinstance(result, list) and len(result) > 0:
             log(f"workspace/symbol returned {len(result)} results")
