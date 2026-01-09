@@ -670,19 +670,22 @@ class ALLSPWrapper:
 
         # Try standard workspace/symbol first
         response = self.send_request("workspace/symbol", params)
-        if response and response.get("result"):
-            log(f"workspace/symbol returned {len(response.get('result', []))} results")
+        result = response.get("result") if response else None
+        if isinstance(result, list) and len(result) > 0:
+            log(f"workspace/symbol returned {len(result)} results")
             return response
 
         # If no results, try AL-specific al/symbolSearch
         log("workspace/symbol returned no results, trying al/symbolSearch")
         al_response = self.send_request("al/symbolSearch", {"query": query})
-        if al_response and al_response.get("result"):
-            log(f"al/symbolSearch returned {len(al_response.get('result', []))} results")
+        al_result = al_response.get("result") if al_response else None
+        if isinstance(al_result, list) and len(al_result) > 0:
+            log(f"al/symbolSearch returned {len(al_result)} results")
             return al_response
 
+        # Ensure we always return an array (never null/None)
         log("No results from either workspace/symbol or al/symbolSearch")
-        return response or {"jsonrpc": "2.0", "result": []}
+        return {"jsonrpc": "2.0", "result": []}
 
     def handle_references(self, params: dict) -> dict:
         """Handle textDocument/references with file opening."""
