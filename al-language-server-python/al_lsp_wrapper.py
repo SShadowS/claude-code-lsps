@@ -353,6 +353,7 @@ class ALLSPWrapper:
         self.initialized = False
         self.root_path: str | None = None
         self.root_uri: str | None = None
+        self.workspace_root: str | None = None  # Original workspace root (may contain multiple AL projects)
         self._read_thread: threading.Thread | None = None
         self._running = False
         self.opened_files: set[str] = set()  # Track opened files
@@ -581,6 +582,10 @@ class ALLSPWrapper:
         """Handle initialize request with AL-specific setup."""
         workspace_root = params.get("rootPath") or params.get("rootUri", "").replace("file:///", "").replace("file://", "")
 
+        # Save original workspace root for call hierarchy (may contain multiple AL projects)
+        self.workspace_root = workspace_root
+        log(f"Workspace root: {self.workspace_root}")
+
         # Auto-detect AL project by finding app.json
         al_project = find_al_project(workspace_root) if workspace_root else None
 
@@ -783,10 +788,15 @@ class ALLSPWrapper:
             self.call_hierarchy_server = None
             return
 
-        # Initialize with workspace
-        if self.root_uri:
-            workspace_folders = [{"uri": self.root_uri, "name": Path(self.root_path).name if self.root_path else "workspace"}]
-            if not self.call_hierarchy_server.initialize(self.root_uri, workspace_folders):
+        # Initialize with workspace root (not AL project) to index all AL files
+        # This handles workspaces with multiple AL projects
+        workspace_path = self.workspace_root or self.root_path
+        if workspace_path:
+            workspace_uri = Path(workspace_path).as_uri()
+            workspace_name = Path(workspace_path).name
+            workspace_folders = [{"uri": workspace_uri, "name": workspace_name}]
+            log(f"Initializing call hierarchy with workspace: {workspace_path}")
+            if not self.call_hierarchy_server.initialize(workspace_uri, workspace_folders):
                 log("Failed to initialize al-call-hierarchy server")
                 self.call_hierarchy_server.shutdown()
                 self.call_hierarchy_server = None
