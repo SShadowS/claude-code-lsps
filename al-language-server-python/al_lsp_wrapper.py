@@ -10,6 +10,7 @@ This wrapper sits between Claude Code and the AL Language Server, handling:
 Based on the Serena project's AL Language Server implementation.
 """
 
+import atexit
 import json
 import os
 import platform
@@ -180,6 +181,8 @@ class CallHierarchyServer:
                 target=self._drain_stderr, daemon=True
             )
             self._stderr_thread.start()
+            # Register cleanup to stop process on exit
+            atexit.register(self.shutdown)
             log("al-call-hierarchy process started")
             return True
         except Exception as e:
@@ -200,6 +203,27 @@ class CallHierarchyServer:
     def is_alive(self) -> bool:
         """Check if the al-call-hierarchy process is still running."""
         return self.process is not None and self.process.poll() is None
+
+    def stop(self) -> None:
+        """Stop the al-call-hierarchy process."""
+        if self.process is not None:
+            log("Stopping al-call-hierarchy process...")
+            try:
+                # Try graceful shutdown first
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # Force kill if it doesn't stop
+                    log("al-call-hierarchy did not terminate, killing...")
+                    self.process.kill()
+                    self.process.wait(timeout=1)
+                log("al-call-hierarchy process stopped")
+            except Exception as e:
+                log(f"Error stopping al-call-hierarchy: {e}")
+            finally:
+                self.process = None
+                self.initialized = False
 
     def send_message(self, msg: dict) -> bool:
         """Send JSON-RPC message to al-call-hierarchy. Returns True on success."""
@@ -324,23 +348,16 @@ class CallHierarchyServer:
         return response
 
     def shutdown(self) -> None:
-        """Shutdown the al-call-hierarchy server."""
-        if self.process:
+        """Gracefully shutdown the al-call-hierarchy server."""
+        if self.process and self.is_alive():
             try:
-                if self.is_alive():
-                    self.send_request("shutdown", None)
-                    self.send_notification("exit", None)
-                self.process.terminate()
-                self.process.wait(timeout=2)
+                # Send LSP shutdown sequence
+                self.send_request("shutdown", None)
+                self.send_notification("exit", None)
             except Exception as e:
-                log(f"Error shutting down al-call-hierarchy: {e}")
-                try:
-                    self.process.kill()
-                except Exception:
-                    pass
-            finally:
-                self.process = None
-                self.initialized = False
+                log(f"Error sending shutdown to al-call-hierarchy: {e}")
+        # Always call stop to ensure process is terminated
+        self.stop()
 
 
 class ALLSPWrapper:
