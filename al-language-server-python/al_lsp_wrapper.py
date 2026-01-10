@@ -880,12 +880,156 @@ class ALLSPWrapper:
             log(f"Sending al/gotodefinition with params: {al_params}")
             response = self.send_request("al/gotodefinition", al_params)
             if response and "result" in response:
+                # Check if result is non-empty
+                result = response.get("result")
+                if not self._is_empty_definition_result(result):
+                    return response
+
+                # Result is empty - try documentSymbol fallback
+                log("Definition result empty, trying documentSymbol fallback")
+                fallback_location = self._try_document_symbol_fallback(params)
+                if fallback_location:
+                    return {"jsonrpc": "2.0", "result": fallback_location}
+
+                # Return original empty response
                 return response
         except Exception as e:
             log(f"al/gotodefinition failed: {e}")
 
         # Fallback to standard
         return self.send_request("textDocument/definition", params) or {}
+
+    def _is_empty_definition_result(self, result) -> bool:
+        """Check if a definition result is empty (null or empty array)."""
+        if result is None:
+            return True
+        if isinstance(result, list) and len(result) == 0:
+            return True
+        return False
+
+    def _try_document_symbol_fallback(self, params: dict):
+        """Try to find symbol definition using hover + documentSymbol."""
+        try:
+            # Get symbol name via hover
+            hover_params = {
+                "textDocument": params["textDocument"],
+                "position": params["position"],
+            }
+            hover_response = self.send_request("textDocument/hover", hover_params)
+            if not hover_response or "result" not in hover_response:
+                return None
+
+            hover_result = hover_response.get("result")
+            if not hover_result:
+                return None
+
+            symbol_name = self._extract_symbol_from_hover(hover_result)
+            if not symbol_name:
+                log("Could not extract symbol name from hover")
+                return None
+
+            log(f"Extracted symbol name from hover: {symbol_name}")
+
+            # Get document symbols
+            doc_symbol_params = {"textDocument": params["textDocument"]}
+            symbols_response = self.send_request("textDocument/documentSymbol", doc_symbol_params)
+            if not symbols_response or "result" not in symbols_response:
+                return None
+
+            symbols = symbols_response.get("result")
+            if not symbols:
+                return None
+
+            # Find matching symbol
+            location = self._find_symbol_location(symbols, symbol_name, params["textDocument"]["uri"])
+            if location:
+                log(f"Found symbol via documentSymbol fallback: {symbol_name}")
+                return location
+
+            return None
+        except Exception as e:
+            log(f"documentSymbol fallback failed: {e}")
+            return None
+
+    def _extract_symbol_from_hover(self, hover_result: dict) -> str:
+        """Extract symbol name from hover response."""
+        import re
+
+        contents = hover_result.get("contents", {})
+        if isinstance(contents, dict):
+            content = contents.get("value", "")
+        elif isinstance(contents, str):
+            content = contents
+        else:
+            return ""
+
+        if not content:
+            return ""
+
+        # AL hover typically returns markdown like:
+        # "procedure TranslateEmailWithAI(...)" or
+        # "local procedure Translate(...)"
+        patterns = [
+            # procedure Name or local procedure Name
+            r'(?:local\s+)?procedure\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)',
+            # trigger OnRun or OnInsert etc
+            r'trigger\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)',
+            # field "Name" or field Name
+            r'field\s*\([^)]+\)\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)',
+            # var Name: Type - variable declarations
+            r'var\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)\s*:',
+            # Generic: first identifier in the content (fallback)
+            r'^[^A-Za-z_"]*("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, content)
+            if match:
+                name = match.group(1)
+                # Remove quotes if present
+                if name.startswith('"') and name.endswith('"'):
+                    name = name[1:-1]
+                return name
+
+        return ""
+
+    def _find_symbol_location(self, symbols: list, symbol_name: str, file_uri: str):
+        """Search document symbols for a matching name and return its location."""
+        for sym in symbols:
+            name = sym.get("name", "")
+            cleaned_name = self._clean_symbol_name(name)
+
+            if name.lower() == symbol_name.lower() or cleaned_name.lower() == symbol_name.lower():
+                # Check for Location (SymbolInformation format)
+                if "location" in sym:
+                    return sym["location"]
+                # Check for range (DocumentSymbol format)
+                if "selectionRange" in sym:
+                    return {
+                        "uri": file_uri,
+                        "range": sym["selectionRange"]
+                    }
+                if "range" in sym:
+                    return {
+                        "uri": file_uri,
+                        "range": sym["range"]
+                    }
+
+            # Search children (DocumentSymbol hierarchy)
+            children = sym.get("children", [])
+            if children:
+                result = self._find_symbol_location(children, symbol_name, file_uri)
+                if result:
+                    return result
+
+        return None
+
+    def _clean_symbol_name(self, name: str) -> str:
+        """Remove parameters and return type from symbol name."""
+        idx = name.find("(")
+        if idx > 0:
+            return name[:idx].strip()
+        return name
 
     def handle_hover(self, params: dict) -> dict:
         """Handle textDocument/hover with file opening."""

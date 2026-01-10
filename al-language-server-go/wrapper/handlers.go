@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -47,6 +48,33 @@ type Location struct {
 type Range struct {
 	Start Position `json:"start"`
 	End   Position `json:"end"`
+}
+
+// HoverResponse represents an LSP hover response
+type HoverResponse struct {
+	Contents MarkupContent `json:"contents"`
+}
+
+// MarkupContent represents LSP markup content
+type MarkupContent struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+// DocumentSymbol represents an LSP document symbol
+type DocumentSymbol struct {
+	Name           string           `json:"name"`
+	Kind           int              `json:"kind"`
+	Range          Range            `json:"range"`
+	SelectionRange Range            `json:"selectionRange"`
+	Children       []DocumentSymbol `json:"children,omitempty"`
+}
+
+// SymbolInformation represents an LSP symbol information (flat format)
+type SymbolInformation struct {
+	Name     string   `json:"name"`
+	Kind     int      `json:"kind"`
+	Location Location `json:"location"`
 }
 
 // Handler interface for method handlers
@@ -129,11 +157,160 @@ func (h *DefinitionHandler) Handle(msg *Message, w WrapperInterface) (*Message, 
 		}
 	}
 
+	// Check if result is empty - try fallback using documentSymbol
+	if isEmptyDefinitionResult(response.Result) {
+		w.Log("Definition result empty, trying documentSymbol fallback")
+
+		// Get symbol name via hover
+		hoverResp, err := w.SendRequestToLSP("textDocument/hover", params)
+		if err == nil && hoverResp.Error == nil && hoverResp.Result != nil {
+			symbolName := extractSymbolNameFromHover(hoverResp.Result)
+			if symbolName != "" {
+				w.Log("Extracted symbol name from hover: %s", symbolName)
+
+				// Get document symbols
+				docSymbolParams := struct {
+					TextDocument TextDocumentIdentifier `json:"textDocument"`
+				}{
+					TextDocument: params.TextDocument,
+				}
+				symbolsResp, err := w.SendRequestToLSP("textDocument/documentSymbol", docSymbolParams)
+				if err == nil && symbolsResp.Error == nil && symbolsResp.Result != nil {
+					if location := findSymbolLocation(symbolsResp.Result, symbolName, params.TextDocument.URI); location != nil {
+						w.Log("Found symbol via documentSymbol fallback: %s", symbolName)
+						locationJSON, _ := json.Marshal(location)
+						return &Message{
+							JSONRPC: "2.0",
+							ID:      msg.ID,
+							Result:  locationJSON,
+						}, nil
+					}
+				}
+			}
+		}
+	}
+
 	return &Message{
 		JSONRPC: "2.0",
 		ID:      msg.ID,
 		Result:  response.Result,
 	}, nil
+}
+
+// isEmptyDefinitionResult checks if a definition result is empty (null or empty array)
+func isEmptyDefinitionResult(result json.RawMessage) bool {
+	if result == nil || len(result) == 0 {
+		return true
+	}
+	// Check for JSON null
+	if string(result) == "null" {
+		return true
+	}
+	// Check for empty array
+	var arr []interface{}
+	if err := json.Unmarshal(result, &arr); err == nil && len(arr) == 0 {
+		return true
+	}
+	return false
+}
+
+// extractSymbolNameFromHover extracts the symbol name from a hover response
+func extractSymbolNameFromHover(result json.RawMessage) string {
+	var hover HoverResponse
+	if err := json.Unmarshal(result, &hover); err != nil {
+		return ""
+	}
+
+	content := hover.Contents.Value
+	if content == "" {
+		return ""
+	}
+
+	// AL hover typically returns markdown like:
+	// "procedure TranslateEmailWithAI(...)" or
+	// "local procedure Translate(...)"
+	// Extract the procedure/trigger/field name
+
+	// Pattern to match AL declarations
+	patterns := []string{
+		// procedure Name or local procedure Name
+		`(?:local\s+)?procedure\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)`,
+		// trigger OnRun or OnInsert etc
+		`trigger\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)`,
+		// field "Name" or field Name
+		`field\s*\([^)]+\)\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)`,
+		// var Name: Type - variable declarations
+		`var\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)\s*:`,
+		// Generic: first identifier in the content (fallback)
+		`^[^A-Za-z_"]*("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)`,
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(content)
+		if len(matches) > 1 {
+			name := matches[1]
+			// Remove quotes if present
+			if strings.HasPrefix(name, "\"") && strings.HasSuffix(name, "\"") {
+				name = name[1 : len(name)-1]
+			}
+			return name
+		}
+	}
+
+	return ""
+}
+
+// findSymbolLocation searches document symbols for a matching name and returns its location
+func findSymbolLocation(result json.RawMessage, symbolName string, fileURI string) *Location {
+	// Try parsing as DocumentSymbol[] (hierarchical)
+	var docSymbols []DocumentSymbol
+	if err := json.Unmarshal(result, &docSymbols); err == nil {
+		if loc := findInDocumentSymbols(docSymbols, symbolName, fileURI); loc != nil {
+			return loc
+		}
+	}
+
+	// Try parsing as SymbolInformation[] (flat)
+	var symbolInfos []SymbolInformation
+	if err := json.Unmarshal(result, &symbolInfos); err == nil {
+		for _, sym := range symbolInfos {
+			if strings.EqualFold(sym.Name, symbolName) || strings.EqualFold(cleanSymbolName(sym.Name), symbolName) {
+				return &sym.Location
+			}
+		}
+	}
+
+	return nil
+}
+
+// findInDocumentSymbols recursively searches DocumentSymbol tree
+func findInDocumentSymbols(symbols []DocumentSymbol, symbolName string, fileURI string) *Location {
+	for _, sym := range symbols {
+		cleanedName := cleanSymbolName(sym.Name)
+		if strings.EqualFold(sym.Name, symbolName) || strings.EqualFold(cleanedName, symbolName) {
+			return &Location{
+				URI:   fileURI,
+				Range: sym.SelectionRange,
+			}
+		}
+		// Search children
+		if len(sym.Children) > 0 {
+			if loc := findInDocumentSymbols(sym.Children, symbolName, fileURI); loc != nil {
+				return loc
+			}
+		}
+	}
+	return nil
+}
+
+// cleanSymbolName removes parameters and return type from symbol name
+// e.g., "TranslateEmailWithAI(...)" -> "TranslateEmailWithAI"
+func cleanSymbolName(name string) string {
+	if idx := strings.Index(name, "("); idx > 0 {
+		return strings.TrimSpace(name[:idx])
+	}
+	return name
 }
 
 // HoverHandler handles textDocument/hover
