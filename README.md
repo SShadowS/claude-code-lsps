@@ -16,6 +16,7 @@ Claude Code marketplace providing AL Language Server wrappers for Business Centr
 - **Go to Definition** - Jump to symbol definitions (tables, codeunits, enums, procedures)
 - **Document Symbols** - List all symbols in a file
 - **Find References** - Find all references to a symbol
+- **Call Hierarchy** - Find incoming and outgoing calls for procedures
 - **Multi-project support** - Workspaces with multiple AL apps
 
 ## Prerequisites
@@ -70,10 +71,10 @@ Claude can use these LSP operations on AL files:
 | `hover` | Working | Get type/documentation info |
 | `documentSymbol` | Working | List symbols in file |
 | `findReferences` | Working | Find all references |
+| `prepareCallHierarchy` | Working | Get call hierarchy item at position |
+| `incomingCalls` | Working | Find callers of a procedure |
+| `outgoingCalls` | Working | Find calls made by a procedure |
 | `workspaceSymbol` | Bug | See [Known Issues](KnownIssues.md) |
-| `prepareCallHierarchy` | Not supported | AL LSP doesn't support this |
-| `incomingCalls` | Not supported | AL LSP doesn't support this |
-| `outgoingCalls` | Not supported | AL LSP doesn't support this |
 
 ## Known Issues
 
