@@ -133,6 +133,216 @@ def find_project_for_file(file_path: str) -> str | None:
     return None
 
 
+def find_call_hierarchy_executable() -> str | None:
+    """Find the al-call-hierarchy executable for the current platform."""
+    script_dir = Path(__file__).parent
+    system = platform.system()
+
+    if system == "Windows":
+        exe_path = script_dir / "bin" / "win32" / "al-call-hierarchy.exe"
+    elif system == "Linux":
+        exe_path = script_dir / "bin" / "linux" / "al-call-hierarchy"
+    elif system == "Darwin":
+        exe_path = script_dir / "bin" / "darwin" / "al-call-hierarchy"
+    else:
+        return None
+
+    if exe_path.exists():
+        return str(exe_path)
+    return None
+
+
+class CallHierarchyServer:
+    """Manages the al-call-hierarchy subprocess for call hierarchy operations."""
+
+    # Timeout for reading responses (seconds)
+    READ_TIMEOUT = 30
+
+    def __init__(self):
+        self.process: subprocess.Popen | None = None
+        self.request_id = 0
+        self.initialized = False
+        self.root_uri: str | None = None
+        self._stderr_thread: threading.Thread | None = None
+
+    def start(self, executable: str) -> bool:
+        """Start the al-call-hierarchy process."""
+        try:
+            log(f"Starting al-call-hierarchy: {executable}")
+            self.process = subprocess.Popen(
+                [executable],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            # Start thread to drain stderr to prevent blocking
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr, daemon=True
+            )
+            self._stderr_thread.start()
+            log("al-call-hierarchy process started")
+            return True
+        except Exception as e:
+            log(f"Failed to start al-call-hierarchy: {e}")
+            return False
+
+    def _drain_stderr(self) -> None:
+        """Drain stderr to prevent subprocess from blocking."""
+        if not self.process or not self.process.stderr:
+            return
+        try:
+            for line in self.process.stderr:
+                # Log stderr output for debugging
+                log(f"al-call-hierarchy stderr: {line.decode('utf-8', errors='replace').strip()}")
+        except Exception:
+            pass
+
+    def is_alive(self) -> bool:
+        """Check if the al-call-hierarchy process is still running."""
+        return self.process is not None and self.process.poll() is None
+
+    def send_message(self, msg: dict) -> bool:
+        """Send JSON-RPC message to al-call-hierarchy. Returns True on success."""
+        if not self.is_alive() or not self.process.stdin:
+            log("CallHierarchy: cannot send message, process not alive")
+            return False
+        try:
+            content = json.dumps(msg)
+            message = f"Content-Length: {len(content)}\r\n\r\n{content}"
+            self.process.stdin.write(message.encode("utf-8"))
+            self.process.stdin.flush()
+            log(f"CallHierarchy sent: {msg.get('method', msg.get('id', 'response'))}")
+            return True
+        except Exception as e:
+            log(f"CallHierarchy error sending message: {e}")
+            return False
+
+    def read_message(self, timeout: float | None = None) -> dict | None:
+        """Read JSON-RPC message from al-call-hierarchy with timeout."""
+        if not self.is_alive() or not self.process.stdout:
+            log("CallHierarchy: cannot read message, process not alive")
+            return None
+
+        if timeout is None:
+            timeout = self.READ_TIMEOUT
+
+        try:
+            import select
+            # Use select for timeout on Unix, fall back to blocking on Windows
+            if platform.system() != "Windows":
+                ready, _, _ = select.select([self.process.stdout], [], [], timeout)
+                if not ready:
+                    log(f"CallHierarchy: read timeout after {timeout}s")
+                    return None
+
+            headers = {}
+            while True:
+                line = self.process.stdout.readline().decode("utf-8")
+                if not line:
+                    log("CallHierarchy: EOF while reading headers")
+                    return None
+                if line == "\r\n":
+                    break
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    headers[key.strip()] = value.strip()
+
+            if "Content-Length" not in headers:
+                log("CallHierarchy: missing Content-Length header")
+                return None
+
+            content_length = int(headers["Content-Length"])
+            content = self.process.stdout.read(content_length).decode("utf-8")
+            return json.loads(content)
+        except Exception as e:
+            log(f"CallHierarchy error reading message: {e}")
+            return None
+
+    def send_request(self, method: str, params: dict | None) -> dict | None:
+        """Send request and wait for response."""
+        if not self.is_alive():
+            log(f"CallHierarchy: process not alive, cannot send {method}")
+            return None
+
+        self.request_id += 1
+        request = {
+            "jsonrpc": "2.0",
+            "id": self.request_id,
+            "method": method,
+            "params": params or {},
+        }
+        if not self.send_message(request):
+            return None
+        return self.read_message()
+
+    def send_notification(self, method: str, params: dict | None) -> None:
+        """Send notification (no response expected)."""
+        notification = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+        }
+        self.send_message(notification)
+
+    def initialize(self, root_uri: str, workspace_folders: list[dict]) -> bool:
+        """Initialize the al-call-hierarchy server."""
+        if self.initialized:
+            return True
+
+        self.root_uri = root_uri
+        response = self.send_request("initialize", {
+            "processId": os.getpid(),
+            "capabilities": {},
+            "rootUri": root_uri,
+            "workspaceFolders": workspace_folders,
+        })
+
+        if response and "result" in response:
+            caps = response["result"].get("capabilities", {})
+            if caps.get("callHierarchyProvider"):
+                self.send_notification("initialized", {})
+                self.initialized = True
+                log("al-call-hierarchy initialized successfully")
+                return True
+            else:
+                log("al-call-hierarchy does not support callHierarchyProvider")
+        elif response and "error" in response:
+            log(f"al-call-hierarchy initialization error: {response['error']}")
+        else:
+            log(f"al-call-hierarchy initialization failed: {response}")
+
+        return False
+
+    def request(self, method: str, params: dict | None) -> dict | None:
+        """Send a request to al-call-hierarchy and return the response."""
+        if not self.is_alive():
+            log(f"CallHierarchy: process not alive for {method}")
+            return None
+        response = self.send_request(method, params)
+        if response and "error" in response:
+            log(f"CallHierarchy error response for {method}: {response['error']}")
+        return response
+
+    def shutdown(self) -> None:
+        """Shutdown the al-call-hierarchy server."""
+        if self.process:
+            try:
+                if self.is_alive():
+                    self.send_request("shutdown", None)
+                    self.send_notification("exit", None)
+                self.process.terminate()
+                self.process.wait(timeout=2)
+            except Exception as e:
+                log(f"Error shutting down al-call-hierarchy: {e}")
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+            finally:
+                self.process = None
+                self.initialized = False
+
+
 class ALLSPWrapper:
     """Wrapper for AL Language Server."""
 
@@ -147,6 +357,7 @@ class ALLSPWrapper:
         self._running = False
         self.opened_files: set[str] = set()  # Track opened files
         self.initialized_projects: set[str] = set()  # Track initialized project roots
+        self.call_hierarchy_server: CallHierarchyServer | None = None
 
     def start(self, executable: str) -> None:
         """Start the AL LSP process."""
@@ -554,7 +765,33 @@ class ALLSPWrapper:
             self.initialized_projects.add(normalized_path)
             log(f"Tracked initial project: {normalized_path}")
 
+        # Initialize call hierarchy server
+        self._start_call_hierarchy_server()
+
         log("Post-initialization complete")
+
+    def _start_call_hierarchy_server(self) -> None:
+        """Start the al-call-hierarchy server for call hierarchy operations."""
+        call_hierarchy_exe = find_call_hierarchy_executable()
+        if not call_hierarchy_exe:
+            log("al-call-hierarchy executable not found, call hierarchy disabled")
+            return
+
+        self.call_hierarchy_server = CallHierarchyServer()
+        if not self.call_hierarchy_server.start(call_hierarchy_exe):
+            log("Failed to start al-call-hierarchy server")
+            self.call_hierarchy_server = None
+            return
+
+        # Initialize with workspace
+        if self.root_uri:
+            workspace_folders = [{"uri": self.root_uri, "name": Path(self.root_path).name if self.root_path else "workspace"}]
+            if not self.call_hierarchy_server.initialize(self.root_uri, workspace_folders):
+                log("Failed to initialize al-call-hierarchy server")
+                self.call_hierarchy_server.shutdown()
+                self.call_hierarchy_server = None
+            else:
+                log("al-call-hierarchy server ready")
 
     def check_project_loaded(self) -> bool:
         """Check if AL project is fully loaded using al/hasProjectClosureLoadedRequest."""
@@ -792,16 +1029,24 @@ class ALLSPWrapper:
             "callHierarchy/incomingCalls",
             "callHierarchy/outgoingCalls",
         ):
-            # These methods are not supported by the AL Language Server
-            log(f"Unsupported method: {method}")
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {
-                    "code": -32601,  # Method not found
-                    "message": f"Method '{method}' is not supported by AL Language Server",
-                },
-            }
+            # Route to al-call-hierarchy server
+            if self.call_hierarchy_server and self.call_hierarchy_server.initialized:
+                log(f"Routing {method} to al-call-hierarchy")
+                response = self.call_hierarchy_server.request(method, params)
+                if response:
+                    response["id"] = request_id
+                    return response
+                return {"jsonrpc": "2.0", "id": request_id, "result": None}
+            else:
+                log(f"Call hierarchy server not available for: {method}")
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32601,
+                        "message": "Call hierarchy server not available",
+                    },
+                }
 
         else:
             # Pass through to AL LSP (for requests with id)
@@ -895,6 +1140,8 @@ def main():
     except Exception as e:
         log(f"Error in main loop: {e}")
     finally:
+        if wrapper.call_hierarchy_server:
+            wrapper.call_hierarchy_server.shutdown()
         if wrapper.process:
             wrapper.process.terminate()
         log("AL LSP Wrapper stopped")
