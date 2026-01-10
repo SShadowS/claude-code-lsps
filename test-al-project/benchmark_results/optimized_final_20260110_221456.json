@@ -1,0 +1,105 @@
+{
+  "label": "optimized_final",
+  "timestamp": "2026-01-10T22:14:52.478776",
+  "workspace": "U:/Git/DO.Support-Zendesk",
+  "file_count": 17547,
+  "executable": "U:\\Git\\claude-code-lsps\\test-al-project\\..\\al-language-server-go-windows\\bin\\al-call-hierarchy.exe",
+  "iterations": 5,
+  "init_time_ms": 3007.64,
+  "index_stats": {},
+  "operations": {
+    "Core/Cloud/Specialization/ManualSetupManagement.Codeunit.al": {
+      "prepareCallHierarchy": {
+        "times_ms": [
+          891.8808000162244,
+          0.17439998919144273,
+          0.12009998317807913,
+          0.0892000098247081,
+          0.06979997851885855
+        ],
+        "min_ms": 0.07,
+        "max_ms": 891.88,
+        "avg_ms": 178.47,
+        "median_ms": 0.12,
+        "stdev_ms": 398.81,
+        "sample_result": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": null
+        }
+      }
+    },
+    "BC/BaseApp/Source/Base Application/Sales/Posting/SalesPostPrepayments.Codeunit.al": {
+      "prepareCallHierarchy": {
+        "times_ms": [
+          0.09940000018104911,
+          0.053099996875971556,
+          0.06059999577701092,
+          0.08849997539073229,
+          0.0509000092279166
+        ],
+        "min_ms": 0.05,
+        "max_ms": 0.1,
+        "avg_ms": 0.07,
+        "median_ms": 0.06,
+        "stdev_ms": 0.02,
+        "sample_result": {
+          "jsonrpc": "2.0",
+          "id": 7,
+          "error": {
+            "code": -32603,
+            "message": "unexpected character at index 56"
+          }
+        }
+      }
+    },
+    "BC/System Application/Source/System Application/Caption Class/src/CaptionClassImpl.Codeunit.al": {
+      "prepareCallHierarchy": {
+        "times_ms": [
+          0.09960000170394778,
+          0.08330002310685813,
+          0.05750000127591193,
+          0.03840000135824084,
+          0.037999998312443495
+        ],
+        "min_ms": 0.04,
+        "max_ms": 0.1,
+        "avg_ms": 0.06,
+        "median_ms": 0.06,
+        "stdev_ms": 0.03,
+        "sample_result": {
+          "jsonrpc": "2.0",
+          "id": 12,
+          "error": {
+            "code": -32603,
+            "message": "unexpected character at index 43"
+          }
+        }
+      }
+    },
+    "BC/BaseApp/Source/Base Application/Utilities/DocumentErrorsMgt.Codeunit.al": {
+      "prepareCallHierarchy": {
+        "times_ms": [
+          0.06540000322274864,
+          0.08329999400302768,
+          0.07420001202262938,
+          0.09929999941959977,
+          0.055599986808374524
+        ],
+        "min_ms": 0.06,
+        "max_ms": 0.1,
+        "avg_ms": 0.08,
+        "median_ms": 0.07,
+        "stdev_ms": 0.02,
+        "sample_result": {
+          "jsonrpc": "2.0",
+          "id": 17,
+          "error": {
+            "code": -32603,
+            "message": "unexpected character at index 56"
+          }
+        }
+      }
+    }
+  }
+}
