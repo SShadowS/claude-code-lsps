@@ -22,6 +22,103 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
+# Windows Job Object for automatic child process cleanup
+# This ensures child processes are terminated when the parent is killed
+_job_handle = None
+
+
+def _create_windows_job_object():
+    """Create a Windows Job Object that terminates children when parent dies."""
+    global _job_handle
+    if platform.system() != "Windows" or _job_handle is not None:
+        return
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+
+        # Job object constants
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+        JobObjectExtendedLimitInformation = 9
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        # Create the job object
+        _job_handle = kernel32.CreateJobObjectW(None, None)
+        if not _job_handle:
+            return
+
+        # Set the job to terminate all processes when the handle is closed
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+        kernel32.SetInformationJobObject(
+            _job_handle,
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+    except Exception:
+        pass
+
+
+def _add_process_to_job(process: subprocess.Popen) -> None:
+    """Add a process to the Windows Job Object."""
+    global _job_handle
+    if platform.system() != "Windows" or _job_handle is None:
+        return
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+
+        # Get the process handle
+        PROCESS_ALL_ACCESS = 0x1F0FFF
+        handle = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, process.pid)
+        if handle:
+            kernel32.AssignProcessToJobObject(_job_handle, handle)
+            kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+# Initialize job object on Windows at module load
+_create_windows_job_object()
+
 # Logging to file for debugging
 LOG_FILE = os.path.join(os.environ.get("TEMP", "/tmp"), "al-lsp-wrapper.log")
 
@@ -181,6 +278,8 @@ class CallHierarchyServer:
                 target=self._drain_stderr, daemon=True
             )
             self._stderr_thread.start()
+            # Add to Windows job object for automatic cleanup on parent exit
+            _add_process_to_job(self.process)
             # Register cleanup to stop process on exit
             atexit.register(self.shutdown)
             log("al-call-hierarchy process started")
@@ -387,6 +486,8 @@ class ALLSPWrapper:
             stderr=subprocess.PIPE,
         )
         self._running = True
+        # Add to Windows job object for automatic cleanup on parent exit
+        _add_process_to_job(self.process)
         log("AL LSP process started")
 
     def send_message(self, msg: dict) -> None:

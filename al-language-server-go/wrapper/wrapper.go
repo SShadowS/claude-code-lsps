@@ -113,6 +113,9 @@ func (w *ALLSPWrapper) Run() error {
 	}
 	w.Log("AL LSP process started (PID: %d)", w.cmd.Process.Pid)
 
+	// Add to Windows job object for automatic cleanup on parent exit
+	addProcessToJob(w.cmd.Process)
+
 	// Setup client communication
 	w.clientReader = bufio.NewReader(os.Stdin)
 	w.clientWriter = os.Stdout
